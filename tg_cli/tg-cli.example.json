@@ -1,0 +1,14 @@
+{
+  "api_id": 12345,
+  "api_hash": "put-api-hash-in-local-.tg-cli.json-or-TG_API_HASH",
+  "session_path": "/absolute/path/to/printer.session",
+  "allowed_chats": [5217114569],
+  "state_path": ".tg-cli-state.json",
+  "audit_log_path": "tg-cli.audit.log",
+  "profile": {
+    "style": "自然、简短、像普通群聊，不要长篇解释。",
+    "language": "中文",
+    "max_chars": 80,
+    "emoji_level": "low"
+  }
+}

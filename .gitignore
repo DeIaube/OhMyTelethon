@@ -6,7 +6,13 @@
 
 # User session
 *.session
+*.session-journal
 /usermedia/
+
+# Local tg-cli state and secrets
+.tg-cli.json
+.tg-cli-state.json
+tg-cli.audit.log
 
 # Builds and testing
 __pycache__/

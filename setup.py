@@ -250,9 +250,14 @@ def main(argv):
             ],
             keywords='telegram api chat client library messaging mtproto',
             packages=find_packages(exclude=[
-                'telethon_*', 'tests*'
+                'telethon_*', 'tests*', 'tg_cli.tests*'
             ]),
             install_requires=['pyaes', 'rsa'],
+            entry_points={
+                'console_scripts': [
+                    'tg-cli=tg_cli.cli:main',
+                ],
+            },
             extras_require={
                 'cryptg': ['cryptg']
             }
