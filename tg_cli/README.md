@@ -20,9 +20,9 @@ export TG_CLI_SESSION=/absolute/path/to/printer.session
 
 Optional local config can live in `tg_cli/.tg-cli.json`. That file is ignored by git. Start from `tg_cli/tg-cli.example.json`.
 
-Profile fields are optional and default to safe game-round guidance. See `tg_cli/docs/profile-config.md` for the full profile schema, preset behavior, prompt behavior, and local safety filtering rules.
+Profile fields are optional and default to safe game-round guidance. Social Policy is split into three layers: `persona` says "像谁", `reply_policy` says "怎么接话", and `initiative` says "怎么主动开口". See `tg_cli/docs/profile-config.md` for the full profile schema, preset behavior, prompt behavior, and local safety filtering rules.
 For a profile-only starter that contains no credentials, copy `tg_cli/docs/local-profile-template.json` into your local `tg_cli/.tg-cli.json` and add credentials through environment variables.
-Round behavior can also live in `tg_cli/.tg-cli.json`, so day-to-day runs can be as short as `tg-cli game round 5217114569`. Multiple named presets can live under `presets`, then selected with `--preset NAME` for `game suggest` or `game round`.
+Round behavior can also live in `tg_cli/.tg-cli.json`, so day-to-day runs can be as short as `tg-cli game round 5217114569`. Multiple named presets can live under `presets`, then selected with `--preset NAME` for `game suggest` or `game round`. Keep initiative disabled or low-frequency by default; use explicit presets such as `chat_normal` or `chat_social` for bounded tests.
 
 ## Commands
 
@@ -38,10 +38,12 @@ tg-cli resume
 tg-cli status
 tg-cli game observe 5217114569
 tg-cli game suggest 5217114569 --limit 20 --json
-tg-cli game suggest 5217114569 --preset casual --operator codex --json
+tg-cli game suggest 5217114569 --preset chat_normal --operator codex --json
+tg-cli game suggest 5217114569 --preset chat_social --operator codex --json
 tg-cli game suggest 5217114569 --operator claude --limit 20 --json
 tg-cli game round 5217114569 --duration 60 --max-replies 8
 tg-cli game round 5217114569 --preset public_group_safe
+tg-cli game round 5217114569 --duration 300 --preset chat_social
 tg-cli game round 5217114569 --duration 60 --quiet-context --min-reply-interval 2 --end-buffer 5
 tg-cli game round 5217114569 --duration 120 --quiet-context \
   --reply-probability 0.75 --mention-reply-probability 1 \
@@ -50,15 +52,21 @@ tg-cli game round 5217114569 --duration 120 --quiet-context \
 tg-cli game round 5217114569 --split-long-replies
 ```
 
-`game suggest` does not call an LLM. It prints an agent-ready context bundle with the selected `preset` name and full resolved profile. Codex, Claude, or another external agent decides the reply, then sends through `tg-cli send`.
+`game suggest` does not call an LLM. It prints an agent-ready context bundle with the selected `preset` name plus resolved `profile`, `persona`, `reply_policy`, and `initiative`. Codex, Claude, or another external agent decides the reply, then sends through `tg-cli send`.
 
-`game round` is the bounded live game loop. It listens for new messages, prints recent context plus a compact agent instruction, asks the current operator for a reply, sends through the safety layer, and exits when `--duration` or `--max-replies` is reached. Use empty input to skip the current message and `/quit` to stop the round. At the end it prints a structured round report with elapsed time, received message counts, prompt count, sent reply count, sent message ids, and skip reasons.
+`game round` is the bounded live game loop. It listens for new messages, prints recent context plus a compact agent instruction, asks the current operator for a reply, sends through the safety layer, and exits when `--duration` or `--max-replies` is reached. `--max-replies` is enforced as an outbound Telegram message cap, so a split reply will not exceed the cap. Use empty input to skip the current message and `/quit` to stop the round. At the end it prints a structured round report with elapsed time, received message counts, prompt count, sent reply count, sent message ids, skip reasons, average reply length, and initiative counts.
+
+Suggested first Social Policy test:
+
+```sh
+tg-cli game round 5217114569 --duration 300 --preset chat_social
+```
 
 See `tg_cli/docs/agent-operator.md` for the Codex/Claude operation flow.
 
 Round operator flags:
 
-- `--preset NAME`: apply `presets.NAME.profile` and `presets.NAME.round` over the top-level defaults before command flags.
+- `--preset NAME`: apply `presets.NAME.profile`, `presets.NAME.persona`, `presets.NAME.reply_policy`, `presets.NAME.initiative`, and `presets.NAME.round` over the top-level defaults before command flags.
 - `--quiet-context`: print only each incoming message and compact agent instruction, not the repeated recent-context block.
 - `--min-reply-interval SECONDS`: keep at least this much time between round sends. Default: `2`.
 - `--end-buffer SECONDS`: stop prompting when less than this much time remains. Default: `5`.
@@ -76,6 +84,7 @@ Round operator flags:
 - `send` asks for confirmation unless `--yes` is passed.
 - `--dry-run` resolves and audits without sending.
 - `profile.forbidden_terms` and `profile.avoid_topics` block outbound text before `client.send_message`.
+- `persona`, `reply_policy`, and `initiative` are prompt guidance only. They do not authorize sending to non-whitelisted chats, bypass `pause`, bypass forbidden terms, skip rate limits, hide audit records, or suppress the round report.
 - `game round` rate-limits sends and stops prompting near the end of a bounded round.
 - `game round` can skip low-information messages, skip by probability, merge rapid messages, and delay sends without becoming a daemon or auto mode.
 - Long round replies can be split into several messages, with each part still passing forbidden-term checks and audit logging.

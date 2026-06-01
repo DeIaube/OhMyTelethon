@@ -179,6 +179,45 @@ def test_round_reply_parts_respects_config(tmp_path):
     ]
 
 
+def test_remaining_message_budget_counts_split_message_ids():
+    report = telegram_ops.RoundReport(duration=60)
+    report.record_sent_message(101)
+    report.record_sent_message(102)
+
+    assert telegram_ops._remaining_message_budget(report, 3) == 1
+    assert telegram_ops._remaining_message_budget(report, 2) == 0
+
+
+def test_initiative_forbidden_topics_match_outbound_text():
+    assert telegram_ops._terms_in_text(['交易', '隐私'], '这个交易别聊了') == ('交易',)
+    assert telegram_ops._terms_in_text(['交易', '交易'], '交易') == ('交易',)
+    assert telegram_ops._terms_in_text(['隐私'], '普通聊天') == ()
+
+
+def test_new_inbound_ids_ignores_self_messages():
+    previous = [
+        {'id': 1, 'out': False, 'text': 'old'},
+        {'id': 2, 'out': True, 'text': 'me'},
+    ]
+    latest = previous + [
+        {'id': 3, 'out': False, 'text': 'new'},
+        {'id': 4, 'out': True, 'text': 'my new message'},
+    ]
+
+    assert telegram_ops._new_inbound_ids(previous, latest) == {3}
+
+
+def test_format_persona_guidance_renders_style_notes_cleanly():
+    guidance = telegram_ops._format_persona_guidance({
+        'identity': '普通群友',
+        'traits': ['短句'],
+        'style_notes': ['像随手回一句'],
+    })
+
+    assert 'style_notes=像随手回一句' in guidance
+    assert "['像随手回一句']" not in guidance
+
+
 def test_round_report_tracks_and_formats_summary():
     report = telegram_ops.RoundReport(duration=60)
 
@@ -191,7 +230,10 @@ def test_round_report_tracks_and_formats_summary():
     report.record_skip('empty_input')
     report.record_sent_message(101)
     report.record_sent_message(102)
-    report.record_sent_reply()
+    report.record_sent_reply('短回复')
+    report.record_initiative_prompt()
+    report.record_initiative_skip('empty_input')
+    report.record_initiative_sent([201])
     report.finish(12.345)
 
     assert report.as_dict() == {
@@ -206,6 +248,14 @@ def test_round_report_tracks_and_formats_summary():
             'probability': 2,
             'empty_input': 1,
         },
+        'avg_reply_chars': 3.0,
+        'initiative_prompts': 1,
+        'initiative_sent': 1,
+        'initiative_skipped': 1,
+        'initiative_skip_reasons': {
+            'empty_input': 1,
+        },
+        'initiative_sent_message_ids': [201],
     }
     assert telegram_ops._format_round_report(report) == [
         'Round report:',
@@ -217,4 +267,10 @@ def test_round_report_tracks_and_formats_summary():
         'sent_replies=1',
         'sent_message_ids=101,102',
         'skip_reasons={"empty_input": 1, "probability": 2}',
+        'avg_reply_chars=3.0',
+        'initiative_prompts=1',
+        'initiative_sent=1',
+        'initiative_skipped=1',
+        'initiative_sent_message_ids=201',
+        'initiative_skip_reasons={"empty_input": 1}',
     ]

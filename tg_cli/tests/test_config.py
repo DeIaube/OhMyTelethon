@@ -3,8 +3,9 @@ import json
 import pytest
 
 from tg_cli.config import (
-    DEFAULT_PROFILE, DEFAULT_ROUND, ConfigError, load_config, normalize_chat_id,
-    normalize_round, parse_chat_ids,
+    DEFAULT_INITIATIVE, DEFAULT_PERSONA, DEFAULT_PROFILE,
+    DEFAULT_REPLY_POLICY, DEFAULT_ROUND, ConfigError, load_config,
+    normalize_chat_id, normalize_round, parse_chat_ids,
 )
 
 
@@ -59,6 +60,60 @@ def test_load_config_supplies_profile_defaults_when_omitted(tmp_path):
 
     assert config.profile == DEFAULT_PROFILE
     assert config.round == DEFAULT_ROUND
+    assert config.reply_policy == DEFAULT_REPLY_POLICY
+    assert config.initiative == DEFAULT_INITIATIVE
+    assert config.persona == DEFAULT_PERSONA
+    assert config.resolve_reply_policy(None) == DEFAULT_REPLY_POLICY
+    assert config.resolve_initiative(None) == DEFAULT_INITIATIVE
+    assert config.resolve_persona(None) == DEFAULT_PERSONA
+
+
+def test_load_config_merges_social_policy_defaults_with_file_values(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'reply_policy': {
+            'reply_threshold': '0.75',
+            'prefer_reply_when': 'asked directly',
+            'skip_when': ['busy thread', None, ''],
+            'custom_hint': 'prefer direct questions',
+        },
+        'initiative': {
+            'enabled': True,
+            'idle_after': '10',
+            'cooldown': 3,
+            'max_starts': '2',
+            'avoid_when_active': False,
+            'recent_window': '120',
+            'topic_sources': 'recent_messages',
+        },
+        'persona': {
+            'identity': 'regular chat member',
+            'traits': 'dry humor',
+            'catchphrases': ['行吧'],
+            'style_notes': None,
+        },
+    }), encoding='utf-8')
+
+    config = load_config(config_path, env={}, cwd=tmp_path)
+
+    assert config.reply_policy['group_type'] == DEFAULT_REPLY_POLICY['group_type']
+    assert config.reply_policy['reply_threshold'] == 0.75
+    assert config.reply_policy['prefer_reply_when'] == ['asked directly']
+    assert config.reply_policy['skip_when'] == ['busy thread']
+    assert config.reply_policy['style_rules'] == DEFAULT_REPLY_POLICY['style_rules']
+    assert config.reply_policy['custom_hint'] == 'prefer direct questions'
+    assert config.initiative['enabled'] is True
+    assert config.initiative['group_type'] == DEFAULT_INITIATIVE['group_type']
+    assert config.initiative['idle_after'] == 10.0
+    assert config.initiative['cooldown'] == 3.0
+    assert config.initiative['max_starts'] == 2
+    assert config.initiative['avoid_when_active'] is False
+    assert config.initiative['recent_window'] == 120.0
+    assert config.initiative['topic_sources'] == ['recent_messages']
+    assert config.persona['identity'] == 'regular chat member'
+    assert config.persona['traits'] == ['dry humor']
+    assert config.persona['catchphrases'] == ['行吧']
+    assert config.persona['style_notes'] == []
 
 
 def test_load_config_merges_profile_defaults_with_file_values(tmp_path):
@@ -156,6 +211,77 @@ def test_load_config_presets_resolve_over_global_profile_and_round(tmp_path):
     assert config.resolve_round(None)['duration'] == 120.0
 
 
+def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'reply_policy': {
+            'reply_threshold': 0.4,
+            'prefer_reply_when': ['global cue'],
+        },
+        'initiative': {
+            'enabled': True,
+            'idle_after': 30,
+            'cooldown': 60,
+        },
+        'persona': {
+            'identity': 'global identity',
+            'traits': ['global trait'],
+        },
+        'presets': {
+            'social': {
+                'reply_policy': {
+                    'reply_threshold': 0.9,
+                    'skip_when': 'heated argument',
+                },
+                'initiative': {
+                    'enabled': False,
+                    'cooldown': 15,
+                    'avoid_when_active': False,
+                    'recent_window': 90,
+                    'topics': 'music',
+                },
+                'persona': {
+                    'traits': ['witty'],
+                    'avoid': 'lecturing',
+                },
+            },
+        },
+    }), encoding='utf-8')
+
+    config = load_config(config_path, env={}, cwd=tmp_path)
+    reply_policy = config.resolve_reply_policy('social')
+    initiative = config.resolve_initiative('social')
+    persona = config.resolve_persona('social')
+
+    assert config.presets['social']['reply_policy'] == {
+        'reply_threshold': 0.9,
+        'skip_when': ['heated argument'],
+    }
+    assert config.presets['social']['initiative'] == {
+        'enabled': False,
+        'cooldown': 15.0,
+        'avoid_when_active': False,
+        'recent_window': 90.0,
+        'topics': ['music'],
+    }
+    assert config.presets['social']['persona'] == {
+        'traits': ['witty'],
+        'avoid': ['lecturing'],
+    }
+    assert reply_policy['reply_threshold'] == 0.9
+    assert reply_policy['prefer_reply_when'] == ['global cue']
+    assert reply_policy['skip_when'] == ['heated argument']
+    assert initiative['enabled'] is False
+    assert initiative['idle_after'] == 30.0
+    assert initiative['cooldown'] == 15.0
+    assert initiative['avoid_when_active'] is False
+    assert initiative['recent_window'] == 90.0
+    assert initiative['topics'] == ['music']
+    assert persona['identity'] == 'global identity'
+    assert persona['traits'] == ['witty']
+    assert persona['avoid'] == ['lecturing']
+
+
 def test_resolve_unknown_preset_raises_clear_error(tmp_path):
     config_path = tmp_path / '.tg-cli.json'
     config_path.write_text(json.dumps({
@@ -168,6 +294,9 @@ def test_resolve_unknown_preset_raises_clear_error(tmp_path):
 
     with pytest.raises(ConfigError, match='Unknown preset "missing".*casual'):
         config.resolve_profile('missing')
+
+    with pytest.raises(ConfigError, match='Unknown preset "missing".*casual'):
+        config.resolve_reply_policy('missing')
 
 
 def test_load_config_rejects_invalid_presets_shape(tmp_path):
@@ -201,6 +330,70 @@ def test_load_config_rejects_invalid_preset_profile_shape(tmp_path):
     }), encoding='utf-8')
 
     with pytest.raises(ConfigError, match='presets.casual.profile'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+
+def test_load_config_rejects_invalid_social_policy_shapes(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'reply_policy': ['not-object'],
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='reply_policy must contain a JSON object'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+    config_path.write_text(json.dumps({
+        'persona': {
+            'traits': {'not': 'a-list'},
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='persona.traits'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+    config_path.write_text(json.dumps({
+        'presets': {
+            'social': {'initiative': 'not-object'},
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='presets.social.initiative'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+
+def test_load_config_rejects_invalid_social_policy_values_with_paths(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'presets': {
+            'social': {
+                'initiative': {
+                    'idle_after': -1,
+                },
+            },
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(
+            ConfigError,
+            match='presets.social.initiative.idle_after'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+    config_path.write_text(json.dumps({
+        'initiative': {
+            'enabled': 'yes',
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='initiative.enabled'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+    config_path.write_text(json.dumps({
+        'reply_policy': {
+            'reply_threshold': -0.1,
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='reply_policy.reply_threshold'):
         load_config(config_path, env={}, cwd=tmp_path)
 
 

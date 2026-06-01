@@ -39,6 +39,56 @@ DEFAULT_ROUND = {
 }
 
 
+DEFAULT_REPLY_POLICY = {
+    'group_type': 'group',
+    'reply_threshold': 0.6,
+    'prefer_reply_when': [
+        'direct question',
+        'mentioned by name',
+        'clear conversational opening',
+    ],
+    'skip_when': [
+        'no clear contribution',
+        'sensitive topic',
+        'heated argument',
+    ],
+    'style_rules': [
+        'keep replies short',
+        'sound like a regular group chat participant',
+    ],
+    'conversation_rules': [
+        'do not fabricate facts',
+        'do not impersonate other people',
+    ],
+}
+
+
+DEFAULT_INITIATIVE = {
+    'enabled': False,
+    'group_type': 'group',
+    'style': 'low_key',
+    'idle_after': 300.0,
+    'cooldown': 600.0,
+    'max_starts': 1,
+    'avoid_when_active': True,
+    'active_threshold': 3,
+    'recent_window': 300.0,
+    'topic_sources': ['recent_messages'],
+    'topics': [],
+    'allowed_intents': ['light_chat', 'ask_open_question'],
+    'forbidden_topics': [],
+}
+
+
+DEFAULT_PERSONA = {
+    'identity': '',
+    'traits': [],
+    'catchphrases': [],
+    'avoid': [],
+    'style_notes': [],
+}
+
+
 def _string_list(value, field_name):
     if value in (None, ''):
         return []
@@ -145,6 +195,172 @@ def normalize_round(round_config=None):
     return normalized
 
 
+def _copy_config_dict(defaults):
+    copied = {}
+    for key, value in defaults.items():
+        copied[key] = list(value) if isinstance(value, list) else value
+    return copied
+
+
+def _object_config(value, path):
+    if value in (None, ''):
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError('{} must contain a JSON object.'.format(path))
+    return value
+
+
+def _social_string(value, path):
+    if value in (None, ''):
+        return ''
+    if not isinstance(value, str):
+        raise ConfigError('{} must be a string.'.format(path))
+    return value.strip()
+
+
+def _social_string_list(value, path):
+    if value in (None, ''):
+        return []
+    if isinstance(value, str):
+        values = [value]
+    else:
+        if isinstance(value, dict):
+            raise ConfigError(
+                '{} must be a string or list of strings.'.format(path))
+        try:
+            values = list(value)
+        except TypeError as exc:
+            raise ConfigError(
+                '{} must be a string or list of strings.'.format(path)) from exc
+
+    result = []
+    for item in values:
+        if item in (None, ''):
+            continue
+        if not isinstance(item, str):
+            raise ConfigError(
+                '{} must be a string or list of strings.'.format(path))
+        item = item.strip()
+        if item:
+            result.append(item)
+    return result
+
+
+def _social_float(data, name, path, minimum=None, maximum=None):
+    field_path = '{}.{}'.format(path, name)
+    try:
+        value = float(data.get(name))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError('{} must be a number.'.format(field_path)) from exc
+    if minimum is not None and value < minimum:
+        raise ConfigError('{} must be greater than or equal to {}.'.format(
+            field_path, minimum))
+    if maximum is not None and value > maximum:
+        raise ConfigError('{} must be between {} and {}.'.format(
+            field_path, minimum, maximum))
+    return value
+
+
+def _social_int(data, name, path, minimum=None):
+    field_path = '{}.{}'.format(path, name)
+    value = data.get(name)
+    if isinstance(value, bool):
+        raise ConfigError('{} must be an integer.'.format(field_path))
+    if isinstance(value, float) and not value.is_integer():
+        raise ConfigError('{} must be an integer.'.format(field_path))
+    try:
+        value = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError('{} must be an integer.'.format(field_path)) from exc
+    if minimum is not None and value < minimum:
+        raise ConfigError('{} must be greater than or equal to {}.'.format(
+            field_path, minimum))
+    return value
+
+
+def _social_bool(data, name, path):
+    field_path = '{}.{}'.format(path, name)
+    value = data.get(name)
+    if not isinstance(value, bool):
+        raise ConfigError('{} must be a boolean.'.format(field_path))
+    return value
+
+
+def normalize_reply_policy(reply_policy=None, path='reply_policy',
+                           include_defaults=True):
+    reply_policy = _object_config(reply_policy, path)
+    normalized = (
+        _copy_config_dict(DEFAULT_REPLY_POLICY)
+        if include_defaults else {}
+    )
+    normalized.update(reply_policy)
+
+    if 'group_type' in normalized:
+        normalized['group_type'] = _social_string(
+            normalized.get('group_type'), '{}.group_type'.format(path))
+    if 'reply_threshold' in normalized:
+        normalized['reply_threshold'] = _social_float(
+            normalized, 'reply_threshold', path, minimum=0.0, maximum=1.0)
+    for field_name in (
+            'prefer_reply_when', 'skip_when', 'style_rules',
+            'conversation_rules'):
+        if field_name in normalized:
+            normalized[field_name] = _social_string_list(
+                normalized.get(field_name), '{}.{}'.format(path, field_name))
+    return normalized
+
+
+def normalize_initiative(initiative=None, path='initiative',
+                         include_defaults=True):
+    initiative = _object_config(initiative, path)
+    normalized = (
+        _copy_config_dict(DEFAULT_INITIATIVE)
+        if include_defaults else {}
+    )
+    normalized.update(initiative)
+
+    for field_name in ('enabled', 'avoid_when_active'):
+        if field_name in normalized:
+            normalized[field_name] = _social_bool(normalized, field_name, path)
+    for field_name in ('group_type', 'style'):
+        if field_name in normalized:
+            normalized[field_name] = _social_string(
+                normalized.get(field_name), '{}.{}'.format(path, field_name))
+    for field_name in ('idle_after', 'cooldown', 'recent_window'):
+        if field_name in normalized:
+            normalized[field_name] = _social_float(
+                normalized, field_name, path, minimum=0.0)
+    for field_name in ('max_starts', 'active_threshold'):
+        if field_name in normalized:
+            normalized[field_name] = _social_int(
+                normalized, field_name, path, minimum=0)
+    for field_name in (
+            'topic_sources', 'topics', 'allowed_intents',
+            'forbidden_topics'):
+        if field_name in normalized:
+            normalized[field_name] = _social_string_list(
+                normalized.get(field_name), '{}.{}'.format(path, field_name))
+    return normalized
+
+
+def normalize_persona(persona=None, path='persona', include_defaults=True):
+    persona = _object_config(persona, path)
+    normalized = (
+        _copy_config_dict(DEFAULT_PERSONA)
+        if include_defaults else {}
+    )
+    normalized.update(persona)
+
+    if 'identity' in normalized:
+        normalized['identity'] = _social_string(
+            normalized.get('identity'), '{}.identity'.format(path))
+    for field_name in ('traits', 'catchphrases', 'avoid', 'style_notes'):
+        if field_name in normalized:
+            normalized[field_name] = _social_string_list(
+                normalized.get(field_name), '{}.{}'.format(path, field_name))
+    return normalized
+
+
 def _normalize_profile_overlay(profile, preset_name):
     normalized = dict(profile)
     if 'max_chars' in normalized:
@@ -241,10 +457,19 @@ def normalize_presets(presets=None):
 
         profile = preset.get('profile', {})
         round_config = preset.get('round', {})
+        reply_policy = preset.get('reply_policy', {})
+        initiative = preset.get('initiative', {})
+        persona = preset.get('persona', {})
         if profile in (None, ''):
             profile = {}
         if round_config in (None, ''):
             round_config = {}
+        if reply_policy in (None, ''):
+            reply_policy = {}
+        if initiative in (None, ''):
+            initiative = {}
+        if persona in (None, ''):
+            persona = {}
         if not isinstance(profile, dict):
             raise ConfigError(
                 'presets.{}.profile must contain a JSON object.'.format(
@@ -253,10 +478,34 @@ def normalize_presets(presets=None):
             raise ConfigError(
                 'presets.{}.round must contain a JSON object.'.format(
                     preset_name))
+        if not isinstance(reply_policy, dict):
+            raise ConfigError(
+                'presets.{}.reply_policy must contain a JSON object.'.format(
+                    preset_name))
+        if not isinstance(initiative, dict):
+            raise ConfigError(
+                'presets.{}.initiative must contain a JSON object.'.format(
+                    preset_name))
+        if not isinstance(persona, dict):
+            raise ConfigError(
+                'presets.{}.persona must contain a JSON object.'.format(
+                    preset_name))
 
         normalized[preset_name] = {
             'profile': _normalize_profile_overlay(profile, preset_name),
             'round': _normalize_round_overlay(round_config, preset_name),
+            'reply_policy': normalize_reply_policy(
+                reply_policy,
+                path='presets.{}.reply_policy'.format(preset_name),
+                include_defaults=False),
+            'initiative': normalize_initiative(
+                initiative,
+                path='presets.{}.initiative'.format(preset_name),
+                include_defaults=False),
+            'persona': normalize_persona(
+                persona,
+                path='presets.{}.persona'.format(preset_name),
+                include_defaults=False),
         }
     return normalized
 
@@ -265,7 +514,8 @@ class AppConfig:
     def __init__(
             self, api_id=None, api_hash=None, session_path=None,
             allowed_chats=None, state_path=None, audit_log_path=None,
-            profile=None, round_config=None, presets=None, config_path=None):
+            profile=None, round_config=None, presets=None, config_path=None,
+            reply_policy=None, initiative=None, persona=None):
         self.api_id = api_id
         self.api_hash = api_hash
         self.session_path = Path(session_path).expanduser().resolve()
@@ -274,6 +524,9 @@ class AppConfig:
         self.audit_log_path = Path(audit_log_path).expanduser().resolve()
         self.profile = normalize_profile(profile)
         self.round = normalize_round(round_config)
+        self.reply_policy = normalize_reply_policy(reply_policy)
+        self.initiative = normalize_initiative(initiative)
+        self.persona = normalize_persona(persona)
         self.presets = normalize_presets(presets)
         self.config_path = Path(config_path).expanduser().resolve() if config_path else None
 
@@ -309,6 +562,27 @@ class AppConfig:
         if preset:
             round_config.update(preset.get('round') or {})
         return normalize_round(round_config)
+
+    def resolve_reply_policy(self, preset_name=None):
+        reply_policy = dict(self.reply_policy)
+        preset = self._preset(preset_name)
+        if preset:
+            reply_policy.update(preset.get('reply_policy') or {})
+        return normalize_reply_policy(reply_policy)
+
+    def resolve_initiative(self, preset_name=None):
+        initiative = dict(self.initiative)
+        preset = self._preset(preset_name)
+        if preset:
+            initiative.update(preset.get('initiative') or {})
+        return normalize_initiative(initiative)
+
+    def resolve_persona(self, preset_name=None):
+        persona = dict(self.persona)
+        preset = self._preset(preset_name)
+        if preset:
+            persona.update(preset.get('persona') or {})
+        return normalize_persona(persona)
 
 
 def default_config_paths(cwd=None):
@@ -409,6 +683,9 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
         round_config=data.get('round'),
         presets=data.get('presets'),
         config_path=config_path,
+        reply_policy=data.get('reply_policy'),
+        initiative=data.get('initiative'),
+        persona=data.get('persona'),
     )
     if require_credentials:
         cfg.require_credentials()

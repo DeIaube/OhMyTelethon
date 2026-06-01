@@ -39,11 +39,44 @@ def _resolve_round(config, preset_name=None):
     return normalize_round(getattr(config, 'round', {}) or {})
 
 
-def _copy_config_with_game_settings(config, profile, round_config=None):
+def _resolve_reply_policy(config, preset_name=None):
+    if hasattr(config, 'resolve_reply_policy'):
+        return config.resolve_reply_policy(preset_name)
+    if preset_name not in (None, ''):
+        raise ConfigError('Presets are not supported by this config object.')
+    return dict(getattr(config, 'reply_policy', {}) or {})
+
+
+def _resolve_initiative(config, preset_name=None):
+    if hasattr(config, 'resolve_initiative'):
+        return config.resolve_initiative(preset_name)
+    if preset_name not in (None, ''):
+        raise ConfigError('Presets are not supported by this config object.')
+    return dict(getattr(config, 'initiative', {}) or {})
+
+
+def _resolve_persona(config, preset_name=None):
+    if hasattr(config, 'resolve_persona'):
+        return config.resolve_persona(preset_name)
+    if preset_name not in (None, ''):
+        raise ConfigError('Presets are not supported by this config object.')
+    return dict(getattr(config, 'persona', {}) or {})
+
+
+def _copy_config_with_game_settings(
+        config, profile, round_config=None, reply_policy=None,
+        initiative=None, persona=None, preset_name=None):
     game_config = copy.copy(config)
     game_config.profile = profile
     if round_config is not None:
         game_config.round = round_config
+    if reply_policy is not None:
+        game_config.reply_policy = reply_policy
+    if initiative is not None:
+        game_config.initiative = initiative
+    if persona is not None:
+        game_config.persona = persona
+    game_config.preset_name = preset_name
     return game_config
 
 
@@ -204,7 +237,12 @@ async def _cmd_game(args, config):
         return
     if args.game_command == 'suggest':
         profile = _resolve_profile(config, args.preset)
-        game_config = _copy_config_with_game_settings(config, profile)
+        reply_policy = _resolve_reply_policy(config, args.preset)
+        initiative = _resolve_initiative(config, args.preset)
+        persona = _resolve_persona(config, args.preset)
+        game_config = _copy_config_with_game_settings(
+            config, profile, reply_policy=reply_policy,
+            initiative=initiative, persona=persona, preset_name=args.preset)
         data = await codex_context(
             game_config, args.chat, args.limit,
             operator=args.operator, preset=args.preset)
@@ -215,6 +253,9 @@ async def _cmd_game(args, config):
             print('Operator: {}'.format(data['operator']))
             print('Preset: {}'.format(data['preset'] or 'default'))
             print('Profile: {}'.format(data['profile']))
+            print('Persona: {}'.format(data['persona']))
+            print('Reply policy: {}'.format(data['reply_policy']))
+            print('Initiative: {}'.format(data['initiative']))
             print('Recent messages:')
             for item in data['messages']:
                 print('- [{id}] {sender}: {text}'.format(**item))
@@ -223,9 +264,14 @@ async def _cmd_game(args, config):
         return
     if args.game_command == 'round':
         profile = _resolve_profile(config, args.preset)
+        reply_policy = _resolve_reply_policy(config, args.preset)
+        initiative = _resolve_initiative(config, args.preset)
+        persona = _resolve_persona(config, args.preset)
         round_config = _round_with_cli_overrides(
             _resolve_round(config, args.preset), args)
-        game_config = _copy_config_with_game_settings(config, profile, round_config)
+        game_config = _copy_config_with_game_settings(
+            config, profile, round_config, reply_policy=reply_policy,
+            initiative=initiative, persona=persona, preset_name=args.preset)
         await interactive_round(
             game_config, args.chat,
             duration=round_config['duration'],

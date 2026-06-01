@@ -86,11 +86,107 @@ def _format_profile_guidance(profile):
     return '; '.join(parts)
 
 
-def _round_instruction(profile):
+def _format_named_list(values):
+    values = [str(value) for value in (values or []) if value not in (None, '')]
+    return ', '.join(values) if values else 'none'
+
+
+def _format_persona_guidance(persona):
+    persona = persona or {}
+    if not persona:
+        return 'persona=default'
+    parts = []
+    for key in ('identity', 'style'):
+        if persona.get(key):
+            parts.append('{}={}'.format(key, persona.get(key)))
+    for key in ('traits', 'catchphrases', 'avoid', 'style_notes'):
+        if persona.get(key):
+            parts.append('{}={}'.format(key, _format_named_list(persona.get(key))))
+    return '; '.join(parts) if parts else 'persona=default'
+
+
+def _format_reply_policy_guidance(reply_policy):
+    reply_policy = reply_policy or {}
+    if not reply_policy:
+        return 'reply_policy=default'
+    parts = []
+    for key in ('group_type', 'reply_threshold', 'mode'):
+        if key in reply_policy and reply_policy.get(key) not in (None, ''):
+            parts.append('{}={}'.format(key, reply_policy.get(key)))
+    for key in ('prefer_reply_when', 'skip_when'):
+        if reply_policy.get(key):
+            parts.append('{}={}'.format(key, _format_named_list(reply_policy.get(key))))
+    style_rules = reply_policy.get('style_rules') or {}
+    if style_rules:
+        parts.append('style_rules={}'.format(
+            json.dumps(style_rules, ensure_ascii=False, sort_keys=True)))
+    conversation_rules = reply_policy.get('conversation_rules') or {}
+    if conversation_rules:
+        parts.append('conversation_rules={}'.format(
+            json.dumps(conversation_rules, ensure_ascii=False, sort_keys=True)))
+    return '; '.join(parts) if parts else 'reply_policy=default'
+
+
+def _format_initiative_guidance(initiative):
+    initiative = initiative or {}
+    if not initiative:
+        return 'initiative=disabled'
+    parts = [
+        'enabled={}'.format(bool(initiative.get('enabled'))),
+        'group_type={}'.format(initiative.get('group_type')),
+        'style={}'.format(initiative.get('style')),
+        'idle_after={}'.format(initiative.get('idle_after')),
+        'cooldown={}'.format(initiative.get('cooldown')),
+        'max_starts={}'.format(initiative.get('max_starts')),
+        'avoid_when_active={}'.format(bool(initiative.get('avoid_when_active', True))),
+        'active_threshold={}'.format(initiative.get('active_threshold')),
+        'recent_window={}'.format(initiative.get('recent_window')),
+    ]
+    if initiative.get('topics'):
+        parts.append('topics={}'.format(_format_named_list(initiative.get('topics'))))
+    if initiative.get('allowed_intents'):
+        parts.append('allowed_intents={}'.format(
+            _format_named_list(initiative.get('allowed_intents'))))
+    if initiative.get('forbidden_topics'):
+        parts.append('forbidden_topics={}'.format(
+            _format_named_list(initiative.get('forbidden_topics'))))
+    return '; '.join(parts)
+
+
+def _round_instruction(profile, persona=None, reply_policy=None):
     return (
-        'Agent instruction: reply with one chat message only; {}. '
-        'Use empty input to skip or /quit to stop.'
-    ).format(_format_profile_guidance(profile))
+        'Agent instruction: decide whether a normal person would reply. '
+        'If not, use empty input to skip. Reply with one short chat message only. '
+        '{}. {}. {}. Do not explain your decision. Use /quit to stop.'
+    ).format(
+        _format_profile_guidance(profile),
+        _format_persona_guidance(persona),
+        _format_reply_policy_guidance(reply_policy))
+
+
+def _initiative_instruction(profile, persona, reply_policy, initiative,
+                            preset=None, idle_seconds=0.0, recent_messages=None):
+    recent_messages = recent_messages or []
+    recent_lines = []
+    for item in recent_messages[-6:]:
+        recent_lines.append('[{id}] {sender}: {text}'.format(**item))
+    recent_context = '\n'.join(recent_lines) if recent_lines else 'none'
+    return (
+        'Agent initiative opportunity:\n'
+        'The group has been idle for {idle:.1f}s. preset={preset}.\n'
+        '{profile}.\n{persona}.\n{reply_policy}.\n{initiative}.\n'
+        'Recent context:\n{recent}\n'
+        'Prefer continuing a harmless recent topic. If none exists, you may start one light, short, open-ended topic. '
+        'Do not mention AI/Codex/Claude/operator identity. Do not advertise, moderate, summarize the group, ask private questions, or join risky topics. '
+        'Output one message to send, or empty input to skip.'
+    ).format(
+        idle=float(idle_seconds),
+        preset=preset or 'default',
+        profile=_format_profile_guidance(profile),
+        persona=_format_persona_guidance(persona),
+        reply_policy=_format_reply_policy_guidance(reply_policy),
+        initiative=_format_initiative_guidance(initiative),
+        recent=recent_context)
 
 
 class RoundReport:
@@ -103,6 +199,12 @@ class RoundReport:
         self.sent_replies = 0
         self.sent_message_ids = []
         self.skip_reasons = {}
+        self.reply_chars = []
+        self.initiative_prompts = 0
+        self.initiative_sent = 0
+        self.initiative_skipped = 0
+        self.initiative_skip_reasons = {}
+        self.initiative_sent_message_ids = []
 
     def record_batch(self, message_count):
         self.received_batches += 1
@@ -118,8 +220,33 @@ class RoundReport:
     def record_sent_message(self, message_id):
         self.sent_message_ids.append(int(message_id))
 
-    def record_sent_reply(self):
+    def record_sent_reply(self, text=''):
         self.sent_replies += 1
+        if text:
+            self.reply_chars.append(len(text))
+
+    def record_initiative_prompt(self):
+        self.initiative_prompts += 1
+
+    def record_initiative_skip(self, reason):
+        reason = str(reason or 'skipped')
+        self.initiative_skipped += 1
+        self.initiative_skip_reasons[reason] = (
+            self.initiative_skip_reasons.get(reason, 0) + 1)
+
+    def record_initiative_sent(self, message_ids):
+        self.initiative_sent += 1
+        self.initiative_sent_message_ids.extend(int(x) for x in message_ids)
+
+    @property
+    def total_sent(self):
+        return self.sent_replies + self.initiative_sent
+
+    @property
+    def avg_reply_chars(self):
+        if not self.reply_chars:
+            return 0.0
+        return sum(self.reply_chars) / len(self.reply_chars)
 
     def finish(self, elapsed):
         self.elapsed = max(0.0, float(elapsed))
@@ -135,6 +262,12 @@ class RoundReport:
             'sent_replies': self.sent_replies,
             'sent_message_ids': list(self.sent_message_ids),
             'skip_reasons': dict(self.skip_reasons),
+            'avg_reply_chars': round(self.avg_reply_chars, 2),
+            'initiative_prompts': self.initiative_prompts,
+            'initiative_sent': self.initiative_sent,
+            'initiative_skipped': self.initiative_skipped,
+            'initiative_skip_reasons': dict(self.initiative_skip_reasons),
+            'initiative_sent_message_ids': list(self.initiative_sent_message_ids),
         }
 
 
@@ -150,6 +283,14 @@ def _format_round_report(report):
     skip_reasons = (
         json.dumps(payload['skip_reasons'], ensure_ascii=False, sort_keys=True)
         if payload['skip_reasons'] else '{}')
+    initiative_ids = (
+        ','.join(str(x) for x in payload['initiative_sent_message_ids'])
+        if payload['initiative_sent_message_ids'] else 'none')
+    initiative_skip_reasons = (
+        json.dumps(
+            payload['initiative_skip_reasons'],
+            ensure_ascii=False, sort_keys=True)
+        if payload['initiative_skip_reasons'] else '{}')
     return [
         'Round report:',
         'duration={}'.format(_format_seconds(payload['duration'])),
@@ -160,6 +301,12 @@ def _format_round_report(report):
         'sent_replies={}'.format(payload['sent_replies']),
         'sent_message_ids={}'.format(sent_ids),
         'skip_reasons={}'.format(skip_reasons),
+        'avg_reply_chars={}'.format(payload['avg_reply_chars']),
+        'initiative_prompts={}'.format(payload['initiative_prompts']),
+        'initiative_sent={}'.format(payload['initiative_sent']),
+        'initiative_skipped={}'.format(payload['initiative_skipped']),
+        'initiative_sent_message_ids={}'.format(initiative_ids),
+        'initiative_skip_reasons={}'.format(initiative_skip_reasons),
     ]
 
 
@@ -247,6 +394,32 @@ def _random_reply_delay(delay_min, delay_max, random_func=None):
     return float(random_func(delay_min, delay_max))
 
 
+def _terms_in_text(terms, text):
+    haystack = (text or '').casefold()
+    matches = []
+    for term in terms or []:
+        term = str(term or '').strip()
+        if term and term.casefold() in haystack:
+            matches.append(term)
+    return tuple(dict.fromkeys(matches))
+
+
+def _inbound_message_ids(messages):
+    ids = set()
+    for item in messages or []:
+        if item.get('out'):
+            continue
+        message_id = item.get('id')
+        if message_id is None:
+            continue
+        ids.add(int(message_id))
+    return ids
+
+
+def _new_inbound_ids(previous_messages, latest_messages):
+    return _inbound_message_ids(latest_messages) - _inbound_message_ids(previous_messages)
+
+
 def _split_reply_text(text, max_chars=28, max_parts=3):
     text = (text or '').strip()
     if not text:
@@ -299,6 +472,11 @@ def _round_reply_parts(config, reply):
         max_chars=round_config.get('split_max_chars', 28),
         max_parts=round_config.get('split_max_parts', 3),
     )
+
+
+def _remaining_message_budget(report, max_replies):
+    remaining = int(max_replies) - len(report.sent_message_ids)
+    return max(0, remaining)
 
 
 async def _collect_merged_events(queue, first_event, merge_window, end_at, loop):
@@ -470,6 +648,27 @@ async def _recent_context_lines(client, entity, limit):
     return messages
 
 
+async def _recent_inbound_activity_times(client, entity, me_id, limit,
+                                         recent_window, now_mono):
+    recent_window = _validate_nonnegative(recent_window, 'recent window')
+    if recent_window <= 0:
+        return []
+    now_wall = _dt.datetime.now(_dt.timezone.utc)
+    times = []
+    async for message in client.iter_messages(entity, limit=limit):
+        if getattr(message, 'out', False) or message.sender_id == me_id:
+            continue
+        message_date = message.date
+        if message_date is None:
+            continue
+        if message_date.tzinfo is None:
+            message_date = message_date.replace(tzinfo=_dt.timezone.utc)
+        age = max(0.0, (now_wall - message_date).total_seconds())
+        if age <= recent_window:
+            times.append(max(0.0, now_mono - age))
+    return times
+
+
 async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                             include_self=False, quiet_context=False,
                             min_reply_interval=2.0, end_buffer=5.0,
@@ -483,6 +682,12 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
     def emit(text=''):
         _emit(output_func, text)
 
+    profile = getattr(config, 'profile', {}) or {}
+    persona = getattr(config, 'persona', {}) or {}
+    reply_policy = getattr(config, 'reply_policy', {}) or {}
+    initiative = getattr(config, 'initiative', {}) or {}
+    preset_name = getattr(config, 'preset_name', None)
+
     if split_long_replies is not None:
         config.round['split_long_replies'] = bool(split_long_replies)
     reply_probability = _validate_probability(reply_probability, 'reply probability')
@@ -494,6 +699,9 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
     if random_delay_max < random_delay_min:
         raise TelegramCliError('random delay max must be greater than or equal to min.')
     merge_window = _validate_nonnegative(merge_window, 'merge window')
+    max_replies = int(max_replies)
+    if max_replies < 1:
+        raise TelegramCliError('max replies must be greater than 0.')
     report = RoundReport(duration=duration)
 
     client = _client(config)
@@ -513,7 +721,10 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 row['title'], row['id'], duration, max_replies,
                 min_reply_interval, end_buffer, reply_probability,
                 random_delay_min, random_delay_max, merge_window))
-        emit('Profile: {}'.format(_format_profile_guidance(config.profile)))
+        emit('Profile: {}'.format(_format_profile_guidance(profile)))
+        emit('Persona: {}'.format(_format_persona_guidance(persona)))
+        emit('Reply policy: {}'.format(_format_reply_policy_guidance(reply_policy)))
+        emit('Initiative: {}'.format(_format_initiative_guidance(initiative)))
         emit('Type a reply to send, empty line to skip, /quit to stop.')
 
         @client.on(events.NewMessage(chats=entity))
@@ -527,7 +738,221 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
         loop = asyncio.get_running_loop()
         round_started_at = loop.time()
         end_at = round_started_at + float(duration)
-        while report.sent_replies < max_replies:
+        last_activity_at = round_started_at
+        last_initiative_at = None
+        initiative_starts = 0
+        recent_event_times = []
+        if initiative and initiative.get('enabled'):
+            startup_recent_window = float(initiative.get('recent_window') or 300.0)
+            startup_times = await _recent_inbound_activity_times(
+                client, entity, me.id, min(limit, 30),
+                startup_recent_window, round_started_at)
+            if startup_times:
+                recent_event_times.extend(startup_times)
+                last_activity_at = max(startup_times)
+
+        def record_skip(source, reason):
+            if source == 'initiative':
+                report.record_initiative_skip(reason)
+            else:
+                report.record_skip(reason)
+
+        def finalize_sent(source, reply, sent_ids):
+            if not sent_ids:
+                return
+            if source == 'initiative':
+                report.record_initiative_sent(sent_ids)
+            else:
+                report.record_sent_reply(reply)
+
+        async def send_operator_text(reply, source):
+            nonlocal last_sent_at, last_activity_at
+            matches = list(safety.find_forbidden_terms(config, reply))
+            if source == 'initiative':
+                matches.extend(_terms_in_text(
+                    initiative.get('forbidden_topics') or [], reply))
+                matches = list(dict.fromkeys(matches))
+            if matches:
+                safety.audit_record(
+                    config, 'game_round_send', row['id'], chat_title=row['title'],
+                    text=reply, status='blocked_forbidden_terms')
+                emit(
+                    'Skipped: reply contains forbidden/sensitive profile term(s): {}.'.format(
+                        ', '.join(matches)))
+                record_skip(source, 'forbidden_terms')
+                return []
+
+            delay = safety.reply_interval_delay(
+                loop.time(), last_sent_at, min_reply_interval)
+            if delay > 0:
+                if safety.should_stop_for_end_buffer(
+                        loop.time() + delay, end_at, end_buffer):
+                    safety.audit_record(
+                        config, 'game_round_send', row['id'],
+                        chat_title=row['title'], text=reply,
+                        status='skipped_end_buffer')
+                    emit(
+                        'Skipped: rate-limit wait would enter end_buffer={}s.'.format(
+                            end_buffer))
+                    record_skip(source, 'rate_limit_end_buffer')
+                    return []
+                emit('Rate limit: waiting {:.1f}s before send.'.format(delay))
+                await asyncio.sleep(delay)
+
+            if safety.should_stop_for_end_buffer(loop.time(), end_at, end_buffer):
+                safety.audit_record(
+                    config, 'game_round_send', row['id'], chat_title=row['title'],
+                    text=reply, status='skipped_end_buffer')
+                emit('Skipped: remaining time is below end_buffer={}s.'.format(
+                    end_buffer))
+                record_skip(source, 'end_buffer')
+                return []
+
+            reply_parts = _round_reply_parts(config, reply)
+            if not reply_parts:
+                emit('Skipped.')
+                record_skip(source, 'empty_reply_parts')
+                return []
+            remaining_message_budget = _remaining_message_budget(report, max_replies)
+            if len(reply_parts) > remaining_message_budget:
+                safety.audit_record(
+                    config, 'game_round_send', row['id'],
+                    chat_title=row['title'], text=reply,
+                    status='skipped_max_replies')
+                emit(
+                    'Skipped: reply would exceed max_replies={} outbound message cap.'.format(
+                        max_replies))
+                record_skip(source, 'max_replies')
+                return []
+
+            sent_ids = []
+            for index, part in enumerate(reply_parts):
+                safety.require_text_allowed(config, part)
+
+                random_delay = (
+                    _random_reply_delay(random_delay_min, random_delay_max)
+                    if index == 0 else 0.0)
+                if random_delay > 0:
+                    if safety.should_stop_for_end_buffer(
+                            loop.time() + random_delay, end_at, end_buffer):
+                        safety.audit_record(
+                            config, 'game_round_send', row['id'],
+                            chat_title=row['title'], text=part,
+                            status='skipped_end_buffer')
+                        emit(
+                            'Skipped: random delay would enter end_buffer={}s.'.format(
+                                end_buffer))
+                        record_skip(source, 'random_delay_end_buffer')
+                        finalize_sent(source, reply, sent_ids)
+                        return sent_ids
+                    emit('Human delay: waiting {:.1f}s before send.'.format(
+                        random_delay))
+                    await asyncio.sleep(random_delay)
+
+                if index > 0:
+                    split_delay = _random_reply_delay(
+                        config.round.get('split_delay_min', 1.0),
+                        config.round.get('split_delay_max', 2.5))
+                    if split_delay > 0:
+                        if safety.should_stop_for_end_buffer(
+                                loop.time() + split_delay, end_at, end_buffer):
+                            safety.audit_record(
+                                config, 'game_round_send', row['id'],
+                                chat_title=row['title'], text=part,
+                                status='skipped_end_buffer')
+                            emit(
+                                'Skipped: split delay would enter end_buffer={}s.'.format(
+                                    end_buffer))
+                            record_skip(source, 'split_delay_end_buffer')
+                            finalize_sent(source, reply, sent_ids)
+                            return sent_ids
+                        emit('Split delay: waiting {:.1f}s.'.format(split_delay))
+                        await asyncio.sleep(split_delay)
+
+                if safety.should_stop_for_end_buffer(loop.time(), end_at, end_buffer):
+                    safety.audit_record(
+                        config, 'game_round_send', row['id'],
+                        chat_title=row['title'], text=part,
+                        status='skipped_end_buffer')
+                    emit('Skipped: remaining time is below end_buffer={}s.'.format(
+                        end_buffer))
+                    record_skip(source, 'end_buffer')
+                    finalize_sent(source, reply, sent_ids)
+                    return sent_ids
+
+                sent = await client.send_message(entity, part)
+                last_sent_at = loop.time()
+                last_activity_at = last_sent_at
+                sent_ids.append(sent.id)
+                report.record_sent_message(sent.id)
+                safety.audit_record(
+                    config, 'game_round_send', row['id'], chat_title=row['title'],
+                    text=part, message_id=sent.id, status='sent')
+                emit('SENT message_id={}'.format(sent.id))
+
+            finalize_sent(source, reply, sent_ids)
+            return sent_ids
+
+        def initiative_wait_seconds(now):
+            if not initiative or not initiative.get('enabled'):
+                return None
+            max_starts = int(initiative.get('max_starts') or 0)
+            if initiative_starts >= max_starts:
+                return None
+            idle_after = float(initiative.get('idle_after') or 0.0)
+            cooldown = float(initiative.get('cooldown') or 0.0)
+            due_at = last_activity_at + idle_after
+            if last_initiative_at is not None:
+                due_at = max(due_at, last_initiative_at + cooldown)
+            return max(0.0, due_at - now)
+
+        async def run_initiative_prompt(now):
+            nonlocal initiative_starts, last_initiative_at, last_activity_at
+            recent_window = float(initiative.get('recent_window') or 300.0)
+            active_threshold = int(initiative.get('active_threshold') or 0)
+            recent_count = len([
+                item for item in recent_event_times
+                if item >= now - recent_window])
+            if initiative.get('avoid_when_active', True) and active_threshold > 0:
+                if recent_count >= active_threshold:
+                    report.record_initiative_skip('active_chat')
+                    last_initiative_at = now
+                    return False
+
+            initiative_starts += 1
+            last_initiative_at = now
+            report.record_initiative_prompt()
+            recent_context = await _recent_context_lines(
+                client, entity, min(limit, 8))
+            emit('')
+            emit(_initiative_instruction(
+                profile, persona, reply_policy, initiative,
+                preset=preset_name, idle_seconds=now - last_activity_at,
+                recent_messages=recent_context))
+            safety.require_can_write(config, row['id'])
+            reply = input_func(
+                'Agent initiative (empty skip, /quit stop): ').strip()
+            if reply == '/quit':
+                emit('Round stopped.')
+                return True
+            if not reply:
+                emit('Skipped initiative.')
+                report.record_initiative_skip('empty_input')
+                return False
+            latest_context = await _recent_context_lines(
+                client, entity, min(limit, 8))
+            new_ids = _new_inbound_ids(recent_context, latest_context)
+            if new_ids:
+                now_after_input = loop.time()
+                last_activity_at = now_after_input
+                recent_event_times.extend([now_after_input] * len(new_ids))
+                emit('Skipped initiative: newer inbound activity arrived.')
+                report.record_initiative_skip('stale_context')
+                return False
+            await send_operator_text(reply, 'initiative')
+            return False
+
+        while len(report.sent_message_ids) < max_replies:
             now = loop.time()
             remaining = end_at - now
             if remaining <= 0:
@@ -537,15 +962,27 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                     end_buffer))
                 report.record_skip('end_buffer')
                 break
+            wait_timeout = max(0.0, remaining - max(0.0, float(end_buffer or 0.0)))
+            initiative_wait = initiative_wait_seconds(now)
+            if initiative_wait == 0.0:
+                should_stop = await run_initiative_prompt(now)
+                if should_stop:
+                    break
+                continue
+            if initiative_wait is not None:
+                wait_timeout = min(wait_timeout, initiative_wait)
+            if wait_timeout <= 0:
+                break
             try:
                 event = await asyncio.wait_for(
-                    queue.get(),
-                    timeout=max(0.0, remaining - max(0.0, float(end_buffer or 0.0))))
+                    queue.get(), timeout=wait_timeout)
             except asyncio.TimeoutError:
-                break
+                continue
 
             events_batch = await _collect_merged_events(
                 queue, event, merge_window, end_at, loop)
+            last_activity_at = loop.time()
+            recent_event_times.extend([last_activity_at] * len(events_batch))
             report.record_batch(len(events_batch))
             incoming_lines = []
             combined_text = []
@@ -583,7 +1020,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 for item in await _recent_context_lines(client, entity, limit):
                     prefix = 'me' if item['out'] else item['sender']
                     emit('- [{}] {}: {}'.format(item['id'], prefix, item['text']))
-            emit(_round_instruction(config.profile))
+            emit(_round_instruction(profile, persona, reply_policy))
             report.record_prompt()
 
             safety.require_can_write(config, row['id'])
@@ -596,121 +1033,11 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 report.record_skip('empty_input')
                 continue
 
-            matches = safety.find_forbidden_terms(config, reply)
-            if matches:
-                safety.audit_record(
-                    config, 'game_round_send', row['id'], chat_title=row['title'],
-                    text=reply, status='blocked_forbidden_terms')
-                emit(
-                    'Skipped: reply contains forbidden/sensitive profile term(s): {}.'.format(
-                        ', '.join(matches)))
-                report.record_skip('forbidden_terms')
-                continue
-
-            delay = safety.reply_interval_delay(
-                loop.time(), last_sent_at, min_reply_interval)
-            if delay > 0:
-                if safety.should_stop_for_end_buffer(
-                        loop.time() + delay, end_at, end_buffer):
-                    safety.audit_record(
-                        config, 'game_round_send', row['id'],
-                        chat_title=row['title'], text=reply,
-                        status='skipped_end_buffer')
-                    emit(
-                        'Skipped: rate-limit wait would enter end_buffer={}s.'.format(
-                            end_buffer))
-                    report.record_skip('rate_limit_end_buffer')
-                    continue
-                emit('Rate limit: waiting {:.1f}s before send.'.format(delay))
-                await asyncio.sleep(delay)
-
-            if safety.should_stop_for_end_buffer(loop.time(), end_at, end_buffer):
-                safety.audit_record(
-                    config, 'game_round_send', row['id'], chat_title=row['title'],
-                    text=reply, status='skipped_end_buffer')
-                emit('Skipped: remaining time is below end_buffer={}s.'.format(
-                    end_buffer))
-                report.record_skip('end_buffer')
-                continue
-
-            reply_parts = _round_reply_parts(config, reply)
-            if not reply_parts:
-                emit('Skipped.')
-                report.record_skip('empty_reply_parts')
-                continue
-
-            sent_ids = []
-            split_skipped = False
-            for index, part in enumerate(reply_parts):
-                safety.require_text_allowed(config, part)
-
-                random_delay = (
-                    _random_reply_delay(random_delay_min, random_delay_max)
-                    if index == 0 else 0.0)
-                if random_delay > 0:
-                    if safety.should_stop_for_end_buffer(
-                            loop.time() + random_delay, end_at, end_buffer):
-                        safety.audit_record(
-                            config, 'game_round_send', row['id'],
-                            chat_title=row['title'], text=part,
-                            status='skipped_end_buffer')
-                        emit(
-                            'Skipped: random delay would enter end_buffer={}s.'.format(
-                                end_buffer))
-                        report.record_skip('random_delay_end_buffer')
-                        split_skipped = True
-                        break
-                    emit('Human delay: waiting {:.1f}s before send.'.format(
-                        random_delay))
-                    await asyncio.sleep(random_delay)
-
-                if index > 0:
-                    split_delay = _random_reply_delay(
-                        config.round.get('split_delay_min', 1.0),
-                        config.round.get('split_delay_max', 2.5))
-                    if split_delay > 0:
-                        if safety.should_stop_for_end_buffer(
-                                loop.time() + split_delay, end_at, end_buffer):
-                            safety.audit_record(
-                                config, 'game_round_send', row['id'],
-                                chat_title=row['title'], text=part,
-                                status='skipped_end_buffer')
-                            emit(
-                                'Skipped: split delay would enter end_buffer={}s.'.format(
-                                    end_buffer))
-                            report.record_skip('split_delay_end_buffer')
-                            split_skipped = True
-                            break
-                        emit('Split delay: waiting {:.1f}s.'.format(split_delay))
-                        await asyncio.sleep(split_delay)
-
-                if safety.should_stop_for_end_buffer(loop.time(), end_at, end_buffer):
-                    safety.audit_record(
-                        config, 'game_round_send', row['id'],
-                        chat_title=row['title'], text=part,
-                        status='skipped_end_buffer')
-                    emit('Skipped: remaining time is below end_buffer={}s.'.format(
-                        end_buffer))
-                    report.record_skip('end_buffer')
-                    split_skipped = True
-                    break
-
-                sent = await client.send_message(entity, part)
-                last_sent_at = loop.time()
-                sent_ids.append(sent.id)
-                report.record_sent_message(sent.id)
-                safety.audit_record(
-                    config, 'game_round_send', row['id'], chat_title=row['title'],
-                    text=part, message_id=sent.id, status='sent')
-                emit('SENT message_id={}'.format(sent.id))
-
-            if sent_ids:
-                report.record_sent_reply()
-            elif split_skipped:
-                continue
+            await send_operator_text(reply, 'reply')
 
         report.finish(loop.time() - round_started_at)
-        emit('Round finished. replies={}'.format(report.sent_replies))
+        emit('Round finished. replies={} initiatives={}'.format(
+            report.sent_replies, report.initiative_sent))
         for line in _format_round_report(report):
             emit(line)
         return report
@@ -720,6 +1047,9 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
 
 async def codex_context(config, chat, limit, operator='agent', preset=None):
     profile = dict(config.profile)
+    persona = dict(getattr(config, 'persona', {}) or {})
+    reply_policy = dict(getattr(config, 'reply_policy', {}) or {})
+    initiative = dict(getattr(config, 'initiative', {}) or {})
     row, messages = await history(config, chat, limit)
     operator = (operator or 'agent').strip() or 'agent'
     return {
@@ -727,11 +1057,14 @@ async def codex_context(config, chat, limit, operator='agent', preset=None):
         'operator': operator,
         'preset': preset or None,
         'profile': profile,
+        'persona': persona,
+        'reply_policy': reply_policy,
+        'initiative': initiative,
         'messages': messages,
         'instruction': (
-            '你是 {}，基于 messages 生成一条候选群聊回复。'
-            '遵守 profile 中的风格、语言、长度、禁用词和回复策略。'
-            '只输出要发送的消息文本，不要解释。'
+            '你是 {}，基于 messages 判断是否自然回复。'
+            '遵守 profile、persona、reply_policy 和 initiative 中的约束。'
+            '如果不适合回复，输出空内容；如果适合，只输出要发送的消息文本，不要解释。'
         ).format(operator),
     }
 
