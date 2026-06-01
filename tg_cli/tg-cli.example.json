@@ -9,6 +9,9 @@
     "style": "自然、简短、像普通群聊，不要长篇解释。",
     "language": "中文",
     "max_chars": 80,
-    "emoji_level": "low"
+    "emoji_level": "low",
+    "avoid_topics": ["隐私", "账号信息"],
+    "forbidden_terms": ["示例禁用词"],
+    "reply_policy": "只在有明确可接话的内容时回复；不确定时跳过；不要编造事实或冒充他人。"
   }
 }

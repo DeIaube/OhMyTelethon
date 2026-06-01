@@ -17,16 +17,25 @@ Current capabilities:
 - `tg-cli send <chat> <text>`: send one message through whitelist, pause, confirmation, and audit checks.
 - `tg-cli pause` / `tg-cli resume` / `tg-cli status`: manage write safety state.
 - `tg-cli game observe <chat>`: observe live messages.
-- `tg-cli game suggest <chat>`: print a Codex-ready context bundle without sending.
+- `tg-cli game suggest <chat>`: print a Codex-ready context bundle, including the resolved profile, without sending.
 - `tg-cli game round <chat> --duration 60 --max-replies 8`: run a bounded interactive chat round where Codex supplies replies and the CLI sends them through the safety layer.
+- `tg-cli game round <chat> --quiet-context --min-reply-interval 2 --end-buffer 5`: run the compact one-minute operator loop with repeated context reduced, send spacing, and an end-of-round buffer.
+
+Profile config:
+
+- `profile.style`, `profile.language`, `profile.max_chars`, `profile.emoji_level`, `profile.avoid_topics`, `profile.forbidden_terms`, and `profile.reply_policy` have safe defaults in `tg_cli.config`.
+- `game suggest` must include the full resolved profile.
+- `game round` must show profile guidance before asking the operator for a reply.
 
 Safety rules:
 
 - Never bypass `tg_cli.safety.require_can_write` for write operations.
+- Never bypass outbound forbidden-term checks before `client.send_message`.
 - Never send to chats outside `allowed_chats`.
 - Keep `pause` as a global write stop.
+- Keep `game round` rate-limit and end-buffer checks local and testable.
 - Audit logs must not store raw message text, API hash, phone number, or session bytes.
-- Keep auto/daemon behavior out of v0.1; use bounded `game round` for live tests.
+- Keep auto/daemon behavior out of v0.2; use bounded `game round` for live tests.
 - If CLI behavior, commands, safety rules, config, or file layout changes, update this file and the relevant `tg_cli/` documentation in the same change.
 
 Local test command:

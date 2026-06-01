@@ -2,7 +2,10 @@ import json
 
 import pytest
 
-from tg_cli.config import ConfigError, load_config, normalize_chat_id, parse_chat_ids
+from tg_cli.config import (
+    DEFAULT_PROFILE, ConfigError, load_config, normalize_chat_id,
+    parse_chat_ids,
+)
 
 
 def test_normalize_chat_id_accepts_telegram_peer_forms():
@@ -49,3 +52,33 @@ def test_load_config_prefers_environment_over_file(tmp_path):
 def test_load_config_requires_credentials_when_requested(tmp_path):
     with pytest.raises(ConfigError):
         load_config(env={}, cwd=tmp_path, require_credentials=True)
+
+
+def test_load_config_supplies_profile_defaults_when_omitted(tmp_path):
+    config = load_config(env={}, cwd=tmp_path)
+
+    assert config.profile == DEFAULT_PROFILE
+
+
+def test_load_config_merges_profile_defaults_with_file_values(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'profile': {
+            'style': 'brief and dry',
+            'max_chars': 42,
+            'avoid_topics': 'spoilers',
+            'forbidden_terms': ['classified', 'internal'],
+            'custom_hint': 'keep it casual',
+        },
+    }), encoding='utf-8')
+
+    config = load_config(config_path, env={}, cwd=tmp_path)
+
+    assert config.profile['style'] == 'brief and dry'
+    assert config.profile['language'] == DEFAULT_PROFILE['language']
+    assert config.profile['max_chars'] == 42
+    assert config.profile['emoji_level'] == DEFAULT_PROFILE['emoji_level']
+    assert config.profile['avoid_topics'] == ['spoilers']
+    assert config.profile['forbidden_terms'] == ['classified', 'internal']
+    assert config.profile['reply_policy'] == DEFAULT_PROFILE['reply_policy']
+    assert config.profile['custom_hint'] == 'keep it casual'

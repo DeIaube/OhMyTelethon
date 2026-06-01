@@ -72,6 +72,15 @@ def build_parser():
     round_cmd.add_argument('--limit', '-n', type=int, default=12)
     round_cmd.add_argument('--max-replies', type=int, default=8)
     round_cmd.add_argument('--include-self', action='store_true')
+    round_cmd.add_argument(
+        '--quiet-context', action='store_true',
+        help='Only print each incoming message and compact Codex instruction, not the repeated recent-context block.')
+    round_cmd.add_argument(
+        '--min-reply-interval', type=float, default=2.0,
+        help='Minimum seconds between game round sends.')
+    round_cmd.add_argument(
+        '--end-buffer', type=float, default=5.0,
+        help='Stop prompting when less than this many seconds remain.')
 
     return parser
 
@@ -143,7 +152,10 @@ async def _cmd_game(args, config):
     if args.game_command == 'round':
         await interactive_round(
             config, args.chat, duration=args.duration, limit=args.limit,
-            max_replies=args.max_replies, include_self=args.include_self)
+            max_replies=args.max_replies, include_self=args.include_self,
+            quiet_context=args.quiet_context,
+            min_reply_interval=args.min_reply_interval,
+            end_buffer=args.end_buffer)
         return
     raise AssertionError(args.game_command)
 

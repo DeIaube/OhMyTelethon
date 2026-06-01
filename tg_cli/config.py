@@ -7,6 +7,56 @@ class ConfigError(RuntimeError):
     pass
 
 
+DEFAULT_PROFILE = {
+    'style': '自然、简短、像普通群聊，不要长篇解释。',
+    'language': '中文',
+    'max_chars': 80,
+    'emoji_level': 'low',
+    'avoid_topics': [],
+    'forbidden_terms': [],
+    'reply_policy': '只在有明确可接话的内容时回复；不确定时跳过；不要编造事实或冒充他人。',
+}
+
+
+def _string_list(value, field_name):
+    if value in (None, ''):
+        return []
+    if isinstance(value, str):
+        values = [value]
+    else:
+        try:
+            values = list(value)
+        except TypeError as exc:
+            raise ConfigError('profile.{} must be a string or list of strings.'.format(
+                field_name)) from exc
+
+    result = []
+    for item in values:
+        if item in (None, ''):
+            continue
+        result.append(str(item).strip())
+    return [item for item in result if item]
+
+
+def normalize_profile(profile=None):
+    if profile in (None, ''):
+        profile = {}
+    if not isinstance(profile, dict):
+        raise ConfigError('profile must contain a JSON object.')
+
+    normalized = dict(DEFAULT_PROFILE)
+    normalized.update(profile)
+    normalized['max_chars'] = int(normalized['max_chars'])
+    if normalized['max_chars'] < 1:
+        raise ConfigError('profile.max_chars must be greater than 0.')
+
+    normalized['avoid_topics'] = _string_list(
+        normalized.get('avoid_topics'), 'avoid_topics')
+    normalized['forbidden_terms'] = _string_list(
+        normalized.get('forbidden_terms'), 'forbidden_terms')
+    return normalized
+
+
 class AppConfig:
     def __init__(
             self, api_id=None, api_hash=None, session_path=None,
@@ -18,7 +68,7 @@ class AppConfig:
         self.allowed_chats = tuple(int(x) for x in (allowed_chats or ()))
         self.state_path = Path(state_path).expanduser().resolve()
         self.audit_log_path = Path(audit_log_path).expanduser().resolve()
-        self.profile = profile or {}
+        self.profile = normalize_profile(profile)
         self.config_path = Path(config_path).expanduser().resolve() if config_path else None
 
     def require_credentials(self):
@@ -122,7 +172,7 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
         allowed_chats=allowed_chats,
         state_path=state_path,
         audit_log_path=audit_log_path,
-        profile=data.get('profile') or {},
+        profile=data.get('profile'),
         config_path=config_path,
     )
     if require_credentials:

@@ -65,3 +65,21 @@ def test_game_round_parser_defaults():
     assert args.limit == 12
     assert args.max_replies == 8
     assert args.include_self is False
+    assert args.quiet_context is False
+    assert args.min_reply_interval == 2.0
+    assert args.end_buffer == 5.0
+
+
+def test_game_round_parser_accepts_operator_safety_flags():
+    parser = cli.build_parser()
+
+    args = parser.parse_args([
+        'game', 'round', '5217114569',
+        '--quiet-context',
+        '--min-reply-interval', '1.5',
+        '--end-buffer', '4',
+    ])
+
+    assert args.quiet_context is True
+    assert args.min_reply_interval == 1.5
+    assert args.end_buffer == 4.0

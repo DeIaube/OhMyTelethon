@@ -52,6 +52,51 @@ def require_can_write(config, chat_id):
     require_allowed_chat(config, chat_id)
 
 
+def _profile_terms(config):
+    profile = getattr(config, 'profile', {}) or {}
+    terms = []
+    for key in ('forbidden_terms', 'avoid_topics'):
+        value = profile.get(key, [])
+        if isinstance(value, str):
+            values = [value]
+        else:
+            values = value or []
+        for item in values:
+            term = str(item).strip()
+            if term:
+                terms.append(term)
+    return terms
+
+
+def find_forbidden_terms(config, text):
+    haystack = (text or '').casefold()
+    matches = []
+    for term in _profile_terms(config):
+        if term.casefold() in haystack:
+            matches.append(term)
+    return tuple(dict.fromkeys(matches))
+
+
+def require_text_allowed(config, text):
+    matches = find_forbidden_terms(config, text)
+    if matches:
+        raise SafetyError(
+            'Message contains forbidden/sensitive profile term(s): {}.'.format(
+                ', '.join(matches)))
+
+
+def reply_interval_delay(now, last_sent_at, min_reply_interval):
+    if last_sent_at is None:
+        return 0.0
+    interval = max(0.0, float(min_reply_interval or 0.0))
+    elapsed = max(0.0, float(now) - float(last_sent_at))
+    return max(0.0, interval - elapsed)
+
+
+def should_stop_for_end_buffer(now, end_at, end_buffer):
+    return (float(end_at) - float(now)) <= max(0.0, float(end_buffer or 0.0))
+
+
 def confirm_send(chat_title, chat_id, text, assume_yes=False, input_func=input, output_func=print):
     if assume_yes:
         return True
