@@ -2,7 +2,7 @@
 
 This repository is primarily the Telethon source tree. Keep Telethon library changes separate from local automation tooling.
 
-The local Telegram game CLI lives in `tg_cli/`. It provides the `tg-cli` command for account inspection, group discovery, safe message sending, bounded observation, and Codex-assisted game rounds.
+The local Telegram game CLI lives in `tg_cli/`. It provides the `tg-cli` command for account inspection, group discovery, safe message sending, bounded observation, and Codex/Claude-assisted game rounds.
 
 Do not commit local Telegram credentials or session artifacts:
 

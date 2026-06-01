@@ -22,7 +22,7 @@ For a local starter file without credentials, see `tg_cli/docs/local-profile-tem
 
 ## Fields
 
-- `style`: Natural-language tone guidance for Codex.
+- `style`: Natural-language tone guidance for the external agent operator.
 - `language`: Preferred reply language.
 - `max_chars`: Suggested maximum reply length. This is prompt guidance, not a hard length rejection.
 - `emoji_level`: Suggested emoji usage, such as `none`, `low`, `medium`, or `high`.
@@ -34,13 +34,13 @@ Extra profile keys are preserved in `game suggest --json` for operator-specific 
 
 ## Prompt Behavior
 
-`tg-cli game suggest <chat>` returns the full resolved `profile` in its JSON bundle and references it in the Codex instruction. The CLI does not call an LLM or generate a reply.
+`tg-cli game suggest <chat>` returns the full resolved `profile` in its JSON bundle and references it in the agent instruction. The CLI does not call an LLM or generate a reply.
 
 `tg-cli game round <chat>` prints the resolved profile once at the start. For each inbound message it prints:
 
 - The incoming message.
 - Recent context, unless `--quiet-context` is set.
-- A compact Codex instruction containing the profile guidance.
+- A compact agent instruction containing the profile guidance.
 
 The current operator still types the reply manually. Empty input skips the message. `/quit` stops the round.
 
@@ -68,7 +68,7 @@ tg-cli game round 5217114569 --duration 60 --max-replies 8 \
 
 ## Human-Likeness Options
 
-These options keep `game round` semi-automatic. The CLI still does not generate replies; it only decides whether to prompt the Codex operator and when to send the operator's typed reply.
+These options keep `game round` semi-automatic. The CLI still does not generate replies; it only decides whether to prompt the external operator and when to send the operator's typed reply.
 
 ```sh
 tg-cli game round 5217114569 --duration 120 --max-replies 10 \
@@ -130,7 +130,7 @@ tg-cli game round 5217114569
 
 ## Splitting Long Replies
 
-When `round.split_long_replies` is enabled, the Codex operator can type one longer reply and the CLI will split it into several Telegram messages. Splitting prefers punctuation boundaries, falls back to character length, and caps the number of parts with `round.split_max_parts`.
+When `round.split_long_replies` is enabled, the external operator can type one longer reply and the CLI will split it into several Telegram messages. Splitting prefers punctuation boundaries, falls back to character length, and caps the number of parts with `round.split_max_parts`.
 
 Each split part still goes through:
 

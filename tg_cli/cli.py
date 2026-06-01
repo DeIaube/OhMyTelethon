@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import sqlite3
 import sys
 
 from . import __version__
@@ -61,12 +62,15 @@ def build_parser():
     observe_cmd.add_argument('--include-self', action='store_true')
     observe_cmd.add_argument('--timeout', type=float, help='Stop after this many seconds.')
 
-    suggest = game_sub.add_parser('suggest', help='Print a Codex-ready reply context bundle.')
+    suggest = game_sub.add_parser('suggest', help='Print an agent-ready reply context bundle.')
     suggest.add_argument('chat')
     suggest.add_argument('--limit', '-n', type=int, default=20)
+    suggest.add_argument(
+        '--operator', default='agent',
+        help='Operator name to include in the generated instruction, such as codex or claude.')
     suggest.add_argument('--json', action='store_true')
 
-    round_cmd = game_sub.add_parser('round', help='Run a bounded interactive Codex-operated chat round.')
+    round_cmd = game_sub.add_parser('round', help='Run a bounded interactive agent-operated chat round.')
     round_cmd.add_argument('chat')
     round_cmd.add_argument('--duration', type=float)
     round_cmd.add_argument('--limit', '-n', type=int)
@@ -74,7 +78,7 @@ def build_parser():
     round_cmd.add_argument('--include-self', action='store_true')
     round_cmd.add_argument(
         '--quiet-context', action='store_true', default=None,
-        help='Only print each incoming message and compact Codex instruction, not the repeated recent-context block.')
+        help='Only print each incoming message and compact agent instruction, not the repeated recent-context block.')
     round_cmd.add_argument(
         '--min-reply-interval', type=float,
         help='Minimum seconds between game round sends.')
@@ -158,16 +162,17 @@ async def _cmd_game(args, config):
         await observe(config, args.chat, include_self=args.include_self, timeout=args.timeout)
         return
     if args.game_command == 'suggest':
-        data = await codex_context(config, args.chat, args.limit)
+        data = await codex_context(config, args.chat, args.limit, operator=args.operator)
         if args.json:
             print(dumps_json(data))
         else:
             print('Chat: {title} (id={id})'.format(**data['chat']))
+            print('Operator: {}'.format(data['operator']))
             print('Profile: {}'.format(data['profile']))
             print('Recent messages:')
             for item in data['messages']:
                 print('- [{id}] {sender}: {text}'.format(**item))
-            print('\nCodex instruction:')
+            print('\nAgent instruction:')
             print(data['instruction'])
         return
     if args.game_command == 'round':
@@ -271,6 +276,15 @@ def main(argv=None):
         return 0
     except (ConfigError, SafetyError, TelegramCliError) as exc:
         print('error: {}'.format(exc), file=sys.stderr)
+        return 2
+    except sqlite3.OperationalError as exc:
+        if 'database is locked' in str(exc).lower():
+            print(
+                'error: Telegram session database is locked. Another tg-cli process may be using the same session. '
+                'Wait for it to finish, or use TG_CLI_SESSION with a separate session file.',
+                file=sys.stderr)
+        else:
+            print('error: sqlite operation failed: {}'.format(exc), file=sys.stderr)
         return 2
 
 

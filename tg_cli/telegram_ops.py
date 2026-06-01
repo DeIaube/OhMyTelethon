@@ -53,6 +53,13 @@ def _format_ts(value):
     return value.isoformat()
 
 
+def _emit(output_func, text=''):
+    try:
+        output_func(text, flush=True)
+    except TypeError:
+        output_func(text)
+
+
 def _remember_inbound_message(seen_ids, message_id):
     if message_id in seen_ids:
         return False
@@ -81,7 +88,7 @@ def _format_profile_guidance(profile):
 
 def _round_instruction(profile):
     return (
-        'Codex instruction: reply with one chat message only; {}. '
+        'Agent instruction: reply with one chat message only; {}. '
         'Use empty input to skip or /quit to stop.'
     ).format(_format_profile_guidance(profile))
 
@@ -403,6 +410,9 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                             split_long_replies=None,
                             input_func=input, output_func=print):
     config.require_credentials()
+    def emit(text=''):
+        _emit(output_func, text)
+
     if split_long_replies is not None:
         config.round['split_long_replies'] = bool(split_long_replies)
     reply_probability = _validate_probability(reply_probability, 'reply probability')
@@ -428,13 +438,13 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
         entity, row = await resolve_chat(client, chat)
         safety.require_can_write(config, row['id'])
 
-        output_func(
+        emit(
             'Round started: {} (id={}) duration={}s max_replies={} min_reply_interval={}s end_buffer={}s reply_probability={} random_delay={}-{}s merge_window={}s.'.format(
                 row['title'], row['id'], duration, max_replies,
                 min_reply_interval, end_buffer, reply_probability,
                 random_delay_min, random_delay_max, merge_window))
-        output_func('Profile: {}'.format(_format_profile_guidance(config.profile)))
-        output_func('Type a reply to send, empty line to skip, /quit to stop.')
+        emit('Profile: {}'.format(_format_profile_guidance(config.profile)))
+        emit('Type a reply to send, empty line to skip, /quit to stop.')
 
         @client.on(events.NewMessage(chats=entity))
         async def handler(event):
@@ -452,7 +462,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
             if remaining <= 0:
                 break
             if safety.should_stop_for_end_buffer(now, end_at, end_buffer):
-                output_func('Round stopping: remaining time is below end_buffer={}s.'.format(
+                emit('Round stopping: remaining time is below end_buffer={}s.'.format(
                     end_buffer))
                 break
             try:
@@ -475,14 +485,14 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 incoming_lines.append((item_event.message.id, sender_name, text))
                 combined_text.append(text)
 
-            output_func('')
+            emit('')
             if len(incoming_lines) == 1:
                 msg_id, sender_name, text = incoming_lines[0]
-                output_func('Incoming [{}] {}: {}'.format(msg_id, sender_name, text))
+                emit('Incoming [{}] {}: {}'.format(msg_id, sender_name, text))
             else:
-                output_func('Incoming batch ({} messages):'.format(len(incoming_lines)))
+                emit('Incoming batch ({} messages):'.format(len(incoming_lines)))
                 for msg_id, sender_name, text in incoming_lines:
-                    output_func('- [{}] {}: {}'.format(msg_id, sender_name, text))
+                    emit('- [{}] {}: {}'.format(msg_id, sender_name, text))
 
             should_prompt, reason = _should_prompt_for_text(
                 '\n'.join(combined_text),
@@ -491,23 +501,23 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 mentions_me=_mentions_me('\n'.join(combined_text), me_names),
                 skip_short_ack=skip_short_ack)
             if not should_prompt:
-                output_func('Skipped: {}.'.format(reason))
+                emit('Skipped: {}.'.format(reason))
                 continue
 
             if not quiet_context:
-                output_func('Recent context:')
+                emit('Recent context:')
                 for item in await _recent_context_lines(client, entity, limit):
                     prefix = 'me' if item['out'] else item['sender']
-                    output_func('- [{}] {}: {}'.format(item['id'], prefix, item['text']))
-            output_func(_round_instruction(config.profile))
+                    emit('- [{}] {}: {}'.format(item['id'], prefix, item['text']))
+            emit(_round_instruction(config.profile))
 
             safety.require_can_write(config, row['id'])
-            reply = input_func('Codex reply (empty skip, /quit stop): ').strip()
+            reply = input_func('Agent reply (empty skip, /quit stop): ').strip()
             if reply == '/quit':
-                output_func('Round stopped.')
+                emit('Round stopped.')
                 break
             if not reply:
-                output_func('Skipped.')
+                emit('Skipped.')
                 continue
 
             matches = safety.find_forbidden_terms(config, reply)
@@ -515,7 +525,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 safety.audit_record(
                     config, 'game_round_send', row['id'], chat_title=row['title'],
                     text=reply, status='blocked_forbidden_terms')
-                output_func(
+                emit(
                     'Skipped: reply contains forbidden/sensitive profile term(s): {}.'.format(
                         ', '.join(matches)))
                 continue
@@ -529,24 +539,24 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                         config, 'game_round_send', row['id'],
                         chat_title=row['title'], text=reply,
                         status='skipped_end_buffer')
-                    output_func(
+                    emit(
                         'Skipped: rate-limit wait would enter end_buffer={}s.'.format(
                             end_buffer))
                     continue
-                output_func('Rate limit: waiting {:.1f}s before send.'.format(delay))
+                emit('Rate limit: waiting {:.1f}s before send.'.format(delay))
                 await asyncio.sleep(delay)
 
             if safety.should_stop_for_end_buffer(loop.time(), end_at, end_buffer):
                 safety.audit_record(
                     config, 'game_round_send', row['id'], chat_title=row['title'],
                     text=reply, status='skipped_end_buffer')
-                output_func('Skipped: remaining time is below end_buffer={}s.'.format(
+                emit('Skipped: remaining time is below end_buffer={}s.'.format(
                     end_buffer))
                 continue
 
             reply_parts = _round_reply_parts(config, reply)
             if not reply_parts:
-                output_func('Skipped.')
+                emit('Skipped.')
                 continue
 
             sent_ids = []
@@ -563,11 +573,11 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                             config, 'game_round_send', row['id'],
                             chat_title=row['title'], text=part,
                             status='skipped_end_buffer')
-                        output_func(
+                        emit(
                             'Skipped: random delay would enter end_buffer={}s.'.format(
                                 end_buffer))
                         break
-                    output_func('Human delay: waiting {:.1f}s before send.'.format(
+                    emit('Human delay: waiting {:.1f}s before send.'.format(
                         random_delay))
                     await asyncio.sleep(random_delay)
 
@@ -582,11 +592,11 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                                 config, 'game_round_send', row['id'],
                                 chat_title=row['title'], text=part,
                                 status='skipped_end_buffer')
-                            output_func(
+                            emit(
                                 'Skipped: split delay would enter end_buffer={}s.'.format(
                                     end_buffer))
                             break
-                        output_func('Split delay: waiting {:.1f}s.'.format(split_delay))
+                        emit('Split delay: waiting {:.1f}s.'.format(split_delay))
                         await asyncio.sleep(split_delay)
 
                 if safety.should_stop_for_end_buffer(loop.time(), end_at, end_buffer):
@@ -594,7 +604,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                         config, 'game_round_send', row['id'],
                         chat_title=row['title'], text=part,
                         status='skipped_end_buffer')
-                    output_func('Skipped: remaining time is below end_buffer={}s.'.format(
+                    emit('Skipped: remaining time is below end_buffer={}s.'.format(
                         end_buffer))
                     break
 
@@ -604,28 +614,30 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 safety.audit_record(
                     config, 'game_round_send', row['id'], chat_title=row['title'],
                     text=part, message_id=sent.id, status='sent')
-                output_func('SENT message_id={}'.format(sent.id))
+                emit('SENT message_id={}'.format(sent.id))
 
             if sent_ids:
                 replies += 1
 
-        output_func('Round finished. replies={}'.format(replies))
+        emit('Round finished. replies={}'.format(replies))
         return replies
     finally:
         await client.disconnect()
 
 
-async def codex_context(config, chat, limit):
+async def codex_context(config, chat, limit, operator='agent'):
     row, messages = await history(config, chat, limit)
+    operator = (operator or 'agent').strip() or 'agent'
     return {
         'chat': row,
+        'operator': operator,
         'profile': dict(config.profile),
         'messages': messages,
         'instruction': (
-            '你是 Codex，基于 messages 生成一条候选群聊回复。'
+            '你是 {}，基于 messages 生成一条候选群聊回复。'
             '遵守 profile 中的风格、语言、长度、禁用词和回复策略。'
             '只输出要发送的消息文本，不要解释。'
-        ),
+        ).format(operator),
     }
 
 

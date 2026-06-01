@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from types import SimpleNamespace
 
 from tg_cli import cli
@@ -53,6 +54,24 @@ def test_groups_text_output_formats_username(monkeypatch, capsys):
     assert '[chat] lu 和 王哥 | id=5217114569 | username=- | members=2' in capsys.readouterr().out
 
 
+def test_main_reports_session_database_lock(monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('TG_API_ID', '1')
+    monkeypatch.setenv('TG_API_HASH', 'hash')
+
+    async def fake_get_me(config):
+        raise sqlite3.OperationalError('database is locked')
+
+    monkeypatch.setattr(cli, 'get_me', fake_get_me)
+
+    code = cli.main(['me'])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert 'Telegram session database is locked' in captured.err
+    assert 'same session' in captured.err
+
+
 def test_game_round_parser_defaults():
     parser = cli.build_parser()
 
@@ -73,6 +92,22 @@ def test_game_round_parser_defaults():
     assert args.merge_window is None
     assert args.quiet_context is None
     assert args.split_long_replies is None
+
+
+def test_game_suggest_parser_accepts_operator():
+    parser = cli.build_parser()
+
+    args = parser.parse_args([
+        'game', 'suggest', '5217114569',
+        '--operator', 'claude',
+        '--json',
+    ])
+
+    assert args.command == 'game'
+    assert args.game_command == 'suggest'
+    assert args.chat == '5217114569'
+    assert args.operator == 'claude'
+    assert args.json is True
 
 
 def test_game_round_parser_humanization_flags():

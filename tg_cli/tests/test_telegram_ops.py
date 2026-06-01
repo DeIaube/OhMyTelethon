@@ -27,7 +27,29 @@ def test_remember_inbound_message_rejects_duplicate_ids():
     assert seen == {10, 11}
 
 
-def test_codex_context_includes_full_profile(monkeypatch, tmp_path):
+def test_emit_requests_flush_when_output_func_supports_it():
+    calls = []
+
+    def output(text, flush=False):
+        calls.append((text, flush))
+
+    telegram_ops._emit(output, 'hello')
+
+    assert calls == [('hello', True)]
+
+
+def test_emit_falls_back_for_simple_output_func():
+    calls = []
+
+    def output(text):
+        calls.append(text)
+
+    telegram_ops._emit(output, 'hello')
+
+    assert calls == ['hello']
+
+
+def test_codex_context_includes_full_profile_and_operator(monkeypatch, tmp_path):
     async def fake_history(config, chat, limit):
         return {'id': 5217114569, 'title': 'test chat'}, [{
             'id': 1,
@@ -45,8 +67,10 @@ def test_codex_context_includes_full_profile(monkeypatch, tmp_path):
         'forbidden_terms': ['classified'],
     })
 
-    data = asyncio.run(telegram_ops.codex_context(config, '5217114569', 20))
+    data = asyncio.run(telegram_ops.codex_context(
+        config, '5217114569', 20, operator='Claude'))
 
+    assert data['operator'] == 'Claude'
     assert data['profile']['style'] == 'brief'
     assert data['profile']['language'] == '中文'
     assert data['profile']['max_chars'] == 80
@@ -55,6 +79,7 @@ def test_codex_context_includes_full_profile(monkeypatch, tmp_path):
     assert data['profile']['forbidden_terms'] == ['classified']
     assert 'reply_policy' in data['profile']
     assert data['messages'][0]['text'] == 'hello'
+    assert '你是 Claude' in data['instruction']
 
 
 def test_short_ack_detection_handles_low_information_messages():

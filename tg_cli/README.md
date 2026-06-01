@@ -38,6 +38,7 @@ tg-cli resume
 tg-cli status
 tg-cli game observe 5217114569
 tg-cli game suggest 5217114569 --limit 20 --json
+tg-cli game suggest 5217114569 --operator claude --limit 20 --json
 tg-cli game round 5217114569 --duration 60 --max-replies 8
 tg-cli game round 5217114569 --duration 60 --quiet-context --min-reply-interval 2 --end-buffer 5
 tg-cli game round 5217114569 --duration 120 --quiet-context \
@@ -47,13 +48,15 @@ tg-cli game round 5217114569 --duration 120 --quiet-context \
 tg-cli game round 5217114569 --split-long-replies
 ```
 
-`game suggest` does not call an LLM. It prints a Codex-ready context bundle with the full resolved profile. Codex decides the reply, then sends through `tg-cli send`.
+`game suggest` does not call an LLM. It prints an agent-ready context bundle with the full resolved profile. Codex, Claude, or another external agent decides the reply, then sends through `tg-cli send`.
 
-`game round` is the bounded live game loop. It listens for new messages, prints recent context plus a compact Codex instruction, asks the current Codex operator for a reply, sends through the safety layer, and exits when `--duration` or `--max-replies` is reached. Use empty input to skip the current message and `/quit` to stop the round.
+`game round` is the bounded live game loop. It listens for new messages, prints recent context plus a compact agent instruction, asks the current operator for a reply, sends through the safety layer, and exits when `--duration` or `--max-replies` is reached. Use empty input to skip the current message and `/quit` to stop the round.
+
+See `tg_cli/docs/agent-operator.md` for the Codex/Claude operation flow.
 
 Round operator flags:
 
-- `--quiet-context`: print only each incoming message and compact Codex instruction, not the repeated recent-context block.
+- `--quiet-context`: print only each incoming message and compact agent instruction, not the repeated recent-context block.
 - `--min-reply-interval SECONDS`: keep at least this much time between round sends. Default: `2`.
 - `--end-buffer SECONDS`: stop prompting when less than this much time remains. Default: `5`.
 - `--reply-probability 0..1`: probabilistically skip prompts so the account does not answer every message.
@@ -74,3 +77,4 @@ Round operator flags:
 - `game round` can skip low-information messages, skip by probability, merge rapid messages, and delay sends without becoming a daemon or auto mode.
 - Long round replies can be split into several messages, with each part still passing forbidden-term checks and audit logging.
 - Audit logs store message hashes and lengths, not raw message text.
+- Use one `tg-cli` process per Telethon session file. If another command runs while `game round` owns the same session, the CLI reports a readable session-lock error instead of a raw SQLite traceback.
