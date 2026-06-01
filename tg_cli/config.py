@@ -145,11 +145,127 @@ def normalize_round(round_config=None):
     return normalized
 
 
+def _normalize_profile_overlay(profile, preset_name):
+    normalized = dict(profile)
+    if 'max_chars' in normalized:
+        normalized['max_chars'] = int(normalized['max_chars'])
+        if normalized['max_chars'] < 1:
+            raise ConfigError('presets.{}.profile.max_chars must be greater than 0.'.format(
+                preset_name))
+    if 'avoid_topics' in normalized:
+        normalized['avoid_topics'] = _string_list(
+            normalized.get('avoid_topics'), 'avoid_topics')
+    if 'forbidden_terms' in normalized:
+        normalized['forbidden_terms'] = _string_list(
+            normalized.get('forbidden_terms'), 'forbidden_terms')
+    return normalized
+
+
+def _normalize_round_overlay(round_config, preset_name):
+    normalized = dict(round_config)
+    float_fields = {
+        'duration': 0.0,
+        'min_reply_interval': 0.0,
+        'end_buffer': 0.0,
+        'random_delay_min': 0.0,
+        'random_delay_max': 0.0,
+        'merge_window': 0.0,
+        'split_delay_min': 0.0,
+        'split_delay_max': 0.0,
+    }
+    int_fields = {
+        'limit': 1,
+        'max_replies': 1,
+        'split_max_chars': 1,
+        'split_max_parts': 1,
+    }
+    bool_fields = {
+        'quiet_context',
+        'skip_short_ack',
+        'split_long_replies',
+    }
+    probability_fields = {
+        'reply_probability': False,
+        'mention_reply_probability': True,
+    }
+
+    for field_name, minimum in float_fields.items():
+        if field_name in normalized:
+            value = float(normalized[field_name])
+            if value < minimum:
+                raise ConfigError('presets.{}.round.{} must be greater than or equal to {}.'.format(
+                    preset_name, field_name, minimum))
+            normalized[field_name] = value
+
+    for field_name, minimum in int_fields.items():
+        if field_name in normalized:
+            value = int(normalized[field_name])
+            if value < minimum:
+                raise ConfigError('presets.{}.round.{} must be greater than or equal to {}.'.format(
+                    preset_name, field_name, minimum))
+            normalized[field_name] = value
+
+    for field_name in bool_fields:
+        if field_name in normalized:
+            normalized[field_name] = bool(normalized[field_name])
+
+    for field_name, allow_none in probability_fields.items():
+        if field_name in normalized:
+            value = normalized[field_name]
+            if value is None and allow_none:
+                normalized[field_name] = None
+                continue
+            value = float(value)
+            if value < 0.0 or value > 1.0:
+                raise ConfigError('presets.{}.round.{} must be between 0 and 1.'.format(
+                    preset_name, field_name))
+            normalized[field_name] = value
+
+    return normalized
+
+
+def normalize_presets(presets=None):
+    if presets in (None, ''):
+        return {}
+    if not isinstance(presets, dict):
+        raise ConfigError('presets must contain a JSON object.')
+
+    normalized = {}
+    for name, preset in presets.items():
+        preset_name = str(name).strip()
+        if not preset_name:
+            raise ConfigError('preset names must not be empty.')
+        if not isinstance(preset, dict):
+            raise ConfigError('presets.{} must contain a JSON object.'.format(
+                preset_name))
+
+        profile = preset.get('profile', {})
+        round_config = preset.get('round', {})
+        if profile in (None, ''):
+            profile = {}
+        if round_config in (None, ''):
+            round_config = {}
+        if not isinstance(profile, dict):
+            raise ConfigError(
+                'presets.{}.profile must contain a JSON object.'.format(
+                    preset_name))
+        if not isinstance(round_config, dict):
+            raise ConfigError(
+                'presets.{}.round must contain a JSON object.'.format(
+                    preset_name))
+
+        normalized[preset_name] = {
+            'profile': _normalize_profile_overlay(profile, preset_name),
+            'round': _normalize_round_overlay(round_config, preset_name),
+        }
+    return normalized
+
+
 class AppConfig:
     def __init__(
             self, api_id=None, api_hash=None, session_path=None,
             allowed_chats=None, state_path=None, audit_log_path=None,
-            profile=None, round_config=None, config_path=None):
+            profile=None, round_config=None, presets=None, config_path=None):
         self.api_id = api_id
         self.api_hash = api_hash
         self.session_path = Path(session_path).expanduser().resolve()
@@ -158,6 +274,7 @@ class AppConfig:
         self.audit_log_path = Path(audit_log_path).expanduser().resolve()
         self.profile = normalize_profile(profile)
         self.round = normalize_round(round_config)
+        self.presets = normalize_presets(presets)
         self.config_path = Path(config_path).expanduser().resolve() if config_path else None
 
     def require_credentials(self):
@@ -165,6 +282,33 @@ class AppConfig:
             raise ConfigError('Missing api_id. Set TG_API_ID or add api_id to config.')
         if not self.api_hash:
             raise ConfigError('Missing api_hash. Set TG_API_HASH or add api_hash to config.')
+
+    def _preset(self, preset_name=None):
+        if preset_name in (None, ''):
+            return None
+        preset_name = str(preset_name).strip()
+        if not preset_name:
+            return None
+        if preset_name not in self.presets:
+            available = ', '.join(sorted(self.presets)) or 'none'
+            raise ConfigError(
+                'Unknown preset "{}". Available presets: {}.'.format(
+                    preset_name, available))
+        return self.presets[preset_name]
+
+    def resolve_profile(self, preset_name=None):
+        profile = dict(self.profile)
+        preset = self._preset(preset_name)
+        if preset:
+            profile.update(preset.get('profile') or {})
+        return normalize_profile(profile)
+
+    def resolve_round(self, preset_name=None):
+        round_config = dict(self.round)
+        preset = self._preset(preset_name)
+        if preset:
+            round_config.update(preset.get('round') or {})
+        return normalize_round(round_config)
 
 
 def default_config_paths(cwd=None):
@@ -263,6 +407,7 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
         audit_log_path=audit_log_path,
         profile=data.get('profile'),
         round_config=data.get('round'),
+        presets=data.get('presets'),
         config_path=config_path,
     )
     if require_credentials:

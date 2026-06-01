@@ -8,12 +8,14 @@ Use this when the agent wants to inspect recent context, write one reply, and se
 
 ```sh
 tg-cli game suggest 2400000996 --operator codex --limit 20 --json
+tg-cli game suggest 2400000996 --preset casual --operator codex --limit 20 --json
 ```
 
 The JSON output includes:
 
 - `chat`: resolved chat metadata.
 - `operator`: the operator name used in the instruction.
+- `preset`: selected preset name, or `null` when no preset was selected.
 - `profile`: local tone, length, sensitive-topic, and reply-policy config.
 - `messages`: recent Telegram messages in chronological order.
 - `instruction`: a ready-to-use prompt for the external agent.
@@ -31,13 +33,16 @@ Use this when the agent should operate a short bounded chat session.
 
 ```sh
 tg-cli game round 2400000996
+tg-cli game round 2400000996 --preset public_group_safe
 ```
 
-The command reads `round.*` defaults from `tg_cli/.tg-cli.json`. In each prompt:
+The command reads `round.*` defaults from `tg_cli/.tg-cli.json`. When `--preset NAME` is present, it first overlays `presets.NAME.profile` and `presets.NAME.round`; explicit command flags still win last. In each prompt:
 
 - Empty input skips the current message.
 - `/quit` stops the round.
 - A typed reply is checked against pause, whitelist, forbidden terms, rate limits, end buffer, and optional long-reply splitting before sending.
+
+At the end of the round, read the structured report before deciding whether to start another round. It includes `duration`, `elapsed`, `received_batches`, `received_messages`, `prompted`, `sent_replies`, `sent_message_ids`, and `skip_reasons`.
 
 ## Safety Expectations
 

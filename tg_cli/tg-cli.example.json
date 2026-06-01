@@ -32,5 +32,31 @@
     "split_delay_min": 1,
     "split_delay_max": 2.5,
     "split_max_parts": 3
+  },
+  "presets": {
+    "casual": {
+      "profile": {
+        "style": "更轻松、更像熟人闲聊；可以轻微调侃，但别太用力。",
+        "max_chars": 60
+      },
+      "round": {
+        "reply_probability": 0.65,
+        "merge_window": 2,
+        "skip_short_ack": true
+      }
+    },
+    "public_group_safe": {
+      "profile": {
+        "avoid_topics": ["隐私", "账号信息", "借钱", "争吵升级"],
+        "forbidden_terms": ["示例禁用词"]
+      },
+      "round": {
+        "quiet_context": true,
+        "min_reply_interval": 5,
+        "end_buffer": 8,
+        "reply_probability": 0.5,
+        "skip_short_ack": true
+      }
+    }
   }
 }

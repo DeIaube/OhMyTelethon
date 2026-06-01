@@ -93,6 +93,76 @@ def _round_instruction(profile):
     ).format(_format_profile_guidance(profile))
 
 
+class RoundReport:
+    def __init__(self, duration=0.0):
+        self.duration = float(duration)
+        self.elapsed = 0.0
+        self.received_batches = 0
+        self.received_messages = 0
+        self.prompted = 0
+        self.sent_replies = 0
+        self.sent_message_ids = []
+        self.skip_reasons = {}
+
+    def record_batch(self, message_count):
+        self.received_batches += 1
+        self.received_messages += int(message_count)
+
+    def record_prompt(self):
+        self.prompted += 1
+
+    def record_skip(self, reason):
+        reason = str(reason or 'skipped')
+        self.skip_reasons[reason] = self.skip_reasons.get(reason, 0) + 1
+
+    def record_sent_message(self, message_id):
+        self.sent_message_ids.append(int(message_id))
+
+    def record_sent_reply(self):
+        self.sent_replies += 1
+
+    def finish(self, elapsed):
+        self.elapsed = max(0.0, float(elapsed))
+        return self
+
+    def as_dict(self):
+        return {
+            'duration': self.duration,
+            'elapsed': self.elapsed,
+            'received_batches': self.received_batches,
+            'received_messages': self.received_messages,
+            'prompted': self.prompted,
+            'sent_replies': self.sent_replies,
+            'sent_message_ids': list(self.sent_message_ids),
+            'skip_reasons': dict(self.skip_reasons),
+        }
+
+
+def _format_seconds(value):
+    return '{:.1f}s'.format(float(value))
+
+
+def _format_round_report(report):
+    payload = report.as_dict()
+    sent_ids = (
+        ','.join(str(x) for x in payload['sent_message_ids'])
+        if payload['sent_message_ids'] else 'none')
+    skip_reasons = (
+        json.dumps(payload['skip_reasons'], ensure_ascii=False, sort_keys=True)
+        if payload['skip_reasons'] else '{}')
+    return [
+        'Round report:',
+        'duration={}'.format(_format_seconds(payload['duration'])),
+        'elapsed={}'.format(_format_seconds(payload['elapsed'])),
+        'received_batches={}'.format(payload['received_batches']),
+        'received_messages={}'.format(payload['received_messages']),
+        'prompted={}'.format(payload['prompted']),
+        'sent_replies={}'.format(payload['sent_replies']),
+        'sent_message_ids={}'.format(sent_ids),
+        'skip_reasons={}'.format(skip_reasons),
+    ]
+
+
 _SHORT_ACKS = {
     '嗯', '恩', '哦', '噢', '昂', '啊', '行', '好', '好吧', '行吧',
     '哈哈', '哈哈哈', '呵呵', '笑死', '真的假的', '真的啊', '是吗',
@@ -424,11 +494,11 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
     if random_delay_max < random_delay_min:
         raise TelegramCliError('random delay max must be greater than or equal to min.')
     merge_window = _validate_nonnegative(merge_window, 'merge window')
+    report = RoundReport(duration=duration)
 
     client = _client(config)
     await client.start()
     queue = asyncio.Queue()
-    replies = 0
     seen_ids = set()
     last_sent_at = None
 
@@ -455,8 +525,9 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
             await queue.put(event)
 
         loop = asyncio.get_running_loop()
-        end_at = loop.time() + float(duration)
-        while replies < max_replies:
+        round_started_at = loop.time()
+        end_at = round_started_at + float(duration)
+        while report.sent_replies < max_replies:
             now = loop.time()
             remaining = end_at - now
             if remaining <= 0:
@@ -464,6 +535,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
             if safety.should_stop_for_end_buffer(now, end_at, end_buffer):
                 emit('Round stopping: remaining time is below end_buffer={}s.'.format(
                     end_buffer))
+                report.record_skip('end_buffer')
                 break
             try:
                 event = await asyncio.wait_for(
@@ -474,6 +546,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
 
             events_batch = await _collect_merged_events(
                 queue, event, merge_window, end_at, loop)
+            report.record_batch(len(events_batch))
             incoming_lines = []
             combined_text = []
             for item_event in events_batch:
@@ -502,6 +575,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 skip_short_ack=skip_short_ack)
             if not should_prompt:
                 emit('Skipped: {}.'.format(reason))
+                report.record_skip(reason)
                 continue
 
             if not quiet_context:
@@ -510,6 +584,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                     prefix = 'me' if item['out'] else item['sender']
                     emit('- [{}] {}: {}'.format(item['id'], prefix, item['text']))
             emit(_round_instruction(config.profile))
+            report.record_prompt()
 
             safety.require_can_write(config, row['id'])
             reply = input_func('Agent reply (empty skip, /quit stop): ').strip()
@@ -518,6 +593,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 break
             if not reply:
                 emit('Skipped.')
+                report.record_skip('empty_input')
                 continue
 
             matches = safety.find_forbidden_terms(config, reply)
@@ -528,6 +604,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 emit(
                     'Skipped: reply contains forbidden/sensitive profile term(s): {}.'.format(
                         ', '.join(matches)))
+                report.record_skip('forbidden_terms')
                 continue
 
             delay = safety.reply_interval_delay(
@@ -542,6 +619,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                     emit(
                         'Skipped: rate-limit wait would enter end_buffer={}s.'.format(
                             end_buffer))
+                    report.record_skip('rate_limit_end_buffer')
                     continue
                 emit('Rate limit: waiting {:.1f}s before send.'.format(delay))
                 await asyncio.sleep(delay)
@@ -552,14 +630,17 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                     text=reply, status='skipped_end_buffer')
                 emit('Skipped: remaining time is below end_buffer={}s.'.format(
                     end_buffer))
+                report.record_skip('end_buffer')
                 continue
 
             reply_parts = _round_reply_parts(config, reply)
             if not reply_parts:
                 emit('Skipped.')
+                report.record_skip('empty_reply_parts')
                 continue
 
             sent_ids = []
+            split_skipped = False
             for index, part in enumerate(reply_parts):
                 safety.require_text_allowed(config, part)
 
@@ -576,6 +657,8 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                         emit(
                             'Skipped: random delay would enter end_buffer={}s.'.format(
                                 end_buffer))
+                        report.record_skip('random_delay_end_buffer')
+                        split_skipped = True
                         break
                     emit('Human delay: waiting {:.1f}s before send.'.format(
                         random_delay))
@@ -595,6 +678,8 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                             emit(
                                 'Skipped: split delay would enter end_buffer={}s.'.format(
                                     end_buffer))
+                            report.record_skip('split_delay_end_buffer')
+                            split_skipped = True
                             break
                         emit('Split delay: waiting {:.1f}s.'.format(split_delay))
                         await asyncio.sleep(split_delay)
@@ -606,32 +691,42 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                         status='skipped_end_buffer')
                     emit('Skipped: remaining time is below end_buffer={}s.'.format(
                         end_buffer))
+                    report.record_skip('end_buffer')
+                    split_skipped = True
                     break
 
                 sent = await client.send_message(entity, part)
                 last_sent_at = loop.time()
                 sent_ids.append(sent.id)
+                report.record_sent_message(sent.id)
                 safety.audit_record(
                     config, 'game_round_send', row['id'], chat_title=row['title'],
                     text=part, message_id=sent.id, status='sent')
                 emit('SENT message_id={}'.format(sent.id))
 
             if sent_ids:
-                replies += 1
+                report.record_sent_reply()
+            elif split_skipped:
+                continue
 
-        emit('Round finished. replies={}'.format(replies))
-        return replies
+        report.finish(loop.time() - round_started_at)
+        emit('Round finished. replies={}'.format(report.sent_replies))
+        for line in _format_round_report(report):
+            emit(line)
+        return report
     finally:
         await client.disconnect()
 
 
-async def codex_context(config, chat, limit, operator='agent'):
+async def codex_context(config, chat, limit, operator='agent', preset=None):
+    profile = dict(config.profile)
     row, messages = await history(config, chat, limit)
     operator = (operator or 'agent').strip() or 'agent'
     return {
         'chat': row,
         'operator': operator,
-        'profile': dict(config.profile),
+        'preset': preset or None,
+        'profile': profile,
         'messages': messages,
         'instruction': (
             '你是 {}，基于 messages 生成一条候选群聊回复。'

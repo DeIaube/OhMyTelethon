@@ -1,6 +1,6 @@
 # tg-cli Profile Config
 
-`profile` is optional in `tg_cli/.tg-cli.json`. Missing fields are filled with defaults, so older configs continue to work.
+`profile` is optional in `tg_cli/.tg-cli.json`. Missing fields are filled with defaults, so older configs continue to work. `round` is optional for bounded live-round behavior, and `presets` can hold named profile/round overlays for different chat modes.
 
 Example:
 
@@ -14,6 +14,18 @@ Example:
     "avoid_topics": ["隐私", "账号信息"],
     "forbidden_terms": ["示例禁用词"],
     "reply_policy": "只在有明确可接话的内容时回复；不确定时跳过；不要编造事实或冒充他人。"
+  },
+  "presets": {
+    "casual": {
+      "profile": {
+        "style": "更轻松、更像熟人闲聊。",
+        "max_chars": 60
+      },
+      "round": {
+        "reply_probability": 0.6,
+        "skip_short_ack": true
+      }
+    }
   }
 }
 ```
@@ -32,9 +44,66 @@ For a local starter file without credentials, see `tg_cli/docs/local-profile-tem
 
 Extra profile keys are preserved in `game suggest --json` for operator-specific hints, but only the fields above are rendered in the compact round instruction.
 
+## Presets
+
+Use top-level `presets` when one account needs different behavior for different game contexts:
+
+```json
+{
+  "profile": {
+    "style": "自然、简短、像普通群聊，不要长篇解释。",
+    "max_chars": 80
+  },
+  "round": {
+    "duration": 120,
+    "max_replies": 8
+  },
+  "presets": {
+    "casual": {
+      "profile": {
+        "style": "更轻松，可以偶尔调侃。",
+        "max_chars": 60
+      },
+      "round": {
+        "reply_probability": 0.7,
+        "merge_window": 2
+      }
+    },
+    "public_group_safe": {
+      "profile": {
+        "avoid_topics": ["隐私", "账号信息", "借钱", "争吵升级"],
+        "forbidden_terms": ["示例禁用词"]
+      },
+      "round": {
+        "quiet_context": true,
+        "min_reply_interval": 5,
+        "end_buffer": 8,
+        "skip_short_ack": true
+      }
+    }
+  }
+}
+```
+
+Select a preset with:
+
+```sh
+tg-cli game suggest 5217114569 --preset casual --operator codex --json
+tg-cli game round 5217114569 --preset public_group_safe
+```
+
+Merge order is deterministic:
+
+- Built-in `DEFAULT_PROFILE` and `DEFAULT_ROUND`.
+- Top-level `profile` and `round` from config.
+- `presets.NAME.profile` and `presets.NAME.round`.
+- Explicit `game round` command flags, such as `--duration` or `--max-replies`.
+
+Unknown preset names fail before the command starts with a message listing available presets.
+
 ## Prompt Behavior
 
-`tg-cli game suggest <chat>` returns the full resolved `profile` in its JSON bundle and references it in the agent instruction. The CLI does not call an LLM or generate a reply.
+`tg-cli game suggest <chat>` returns the selected `preset` name and full resolved `profile` in its JSON bundle, and references the profile in the agent instruction. The CLI does not call an LLM or generate a reply.
 
 `tg-cli game round <chat>` prints the resolved profile once at the start. For each inbound message it prints:
 
@@ -43,6 +112,22 @@ Extra profile keys are preserved in `game suggest --json` for operator-specific 
 - A compact agent instruction containing the profile guidance.
 
 The current operator still types the reply manually. Empty input skips the message. `/quit` stops the round.
+
+At exit, `game round` prints a report:
+
+```text
+Round report:
+duration=120.0s
+elapsed=64.2s
+received_batches=5
+received_messages=7
+prompted=3
+sent_replies=2
+sent_message_ids=101,102
+skip_reasons={"empty_input": 1, "probability": 2}
+```
+
+`sent_replies` counts successful operator replies. If long-reply splitting sends multiple Telegram messages for one typed reply, all Telegram message ids appear in `sent_message_ids`.
 
 ## Local Safety Filtering
 

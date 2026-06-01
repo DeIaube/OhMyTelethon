@@ -107,6 +107,103 @@ def test_load_config_merges_round_defaults_with_file_values(tmp_path):
     assert config.round['max_replies'] == DEFAULT_ROUND['max_replies']
 
 
+def test_load_config_presets_resolve_over_global_profile_and_round(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'profile': {
+            'style': 'global style',
+            'avoid_topics': ['global topic'],
+        },
+        'round': {
+            'duration': 120,
+            'max_replies': 4,
+            'quiet_context': False,
+        },
+        'presets': {
+            'casual': {
+                'profile': {
+                    'max_chars': 42,
+                    'forbidden_terms': 'preset secret',
+                },
+                'round': {
+                    'duration': 30,
+                    'quiet_context': True,
+                },
+            },
+        },
+    }), encoding='utf-8')
+
+    config = load_config(config_path, env={}, cwd=tmp_path)
+    profile = config.resolve_profile('casual')
+    round_config = config.resolve_round('casual')
+
+    assert config.presets['casual']['profile'] == {
+        'max_chars': 42,
+        'forbidden_terms': ['preset secret'],
+    }
+    assert config.presets['casual']['round'] == {
+        'duration': 30.0,
+        'quiet_context': True,
+    }
+    assert profile['style'] == 'global style'
+    assert profile['avoid_topics'] == ['global topic']
+    assert profile['max_chars'] == 42
+    assert profile['forbidden_terms'] == ['preset secret']
+    assert round_config['duration'] == 30.0
+    assert round_config['max_replies'] == 4
+    assert round_config['quiet_context'] is True
+    assert config.resolve_profile(None)['max_chars'] == DEFAULT_PROFILE['max_chars']
+    assert config.resolve_round(None)['duration'] == 120.0
+
+
+def test_resolve_unknown_preset_raises_clear_error(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'presets': {
+            'casual': {'profile': {'style': 'casual'}},
+        },
+    }), encoding='utf-8')
+
+    config = load_config(config_path, env={}, cwd=tmp_path)
+
+    with pytest.raises(ConfigError, match='Unknown preset "missing".*casual'):
+        config.resolve_profile('missing')
+
+
+def test_load_config_rejects_invalid_presets_shape(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'presets': ['not-object'],
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='presets must contain a JSON object'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+
+def test_load_config_rejects_invalid_preset_value(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'presets': {
+            'casual': ['not-object'],
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='presets.casual must contain a JSON object'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+
+def test_load_config_rejects_invalid_preset_profile_shape(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'presets': {
+            'casual': {'profile': 'not-object'},
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='presets.casual.profile'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+
 def test_normalize_round_rejects_invalid_probability():
     with pytest.raises(ConfigError):
         normalize_round({'reply_probability': 1.2})

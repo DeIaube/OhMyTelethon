@@ -1,11 +1,12 @@
 import argparse
 import asyncio
+import copy
 import json
 import sqlite3
 import sys
 
 from . import __version__
-from .config import ConfigError, load_config
+from .config import ConfigError, load_config, normalize_round
 from . import safety
 from .safety import SafetyError
 from .telegram_ops import (
@@ -20,6 +21,44 @@ def _print_json(data):
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _resolve_profile(config, preset_name=None):
+    if hasattr(config, 'resolve_profile'):
+        return config.resolve_profile(preset_name)
+    if preset_name not in (None, ''):
+        raise ConfigError('Presets are not supported by this config object.')
+    return dict(getattr(config, 'profile', {}) or {})
+
+
+def _resolve_round(config, preset_name=None):
+    if hasattr(config, 'resolve_round'):
+        return config.resolve_round(preset_name)
+    if preset_name not in (None, ''):
+        raise ConfigError('Presets are not supported by this config object.')
+    return normalize_round(getattr(config, 'round', {}) or {})
+
+
+def _copy_config_with_game_settings(config, profile, round_config=None):
+    game_config = copy.copy(config)
+    game_config.profile = profile
+    if round_config is not None:
+        game_config.round = round_config
+    return game_config
+
+
+def _round_with_cli_overrides(round_config, args):
+    effective = dict(round_config)
+    for name in (
+            'duration', 'limit', 'max_replies', 'quiet_context',
+            'min_reply_interval', 'end_buffer', 'reply_probability',
+            'mention_reply_probability', 'random_delay_min',
+            'random_delay_max', 'skip_short_ack', 'merge_window',
+            'split_long_replies'):
+        value = getattr(args, name)
+        if value is not None:
+            effective[name] = value
+    return normalize_round(effective)
 
 
 def build_parser():
@@ -65,6 +104,7 @@ def build_parser():
     suggest = game_sub.add_parser('suggest', help='Print an agent-ready reply context bundle.')
     suggest.add_argument('chat')
     suggest.add_argument('--limit', '-n', type=int, default=20)
+    suggest.add_argument('--preset', help='Named profile/round preset from config.presets.')
     suggest.add_argument(
         '--operator', default='agent',
         help='Operator name to include in the generated instruction, such as codex or claude.')
@@ -72,6 +112,7 @@ def build_parser():
 
     round_cmd = game_sub.add_parser('round', help='Run a bounded interactive agent-operated chat round.')
     round_cmd.add_argument('chat')
+    round_cmd.add_argument('--preset', help='Named profile/round preset from config.presets.')
     round_cmd.add_argument('--duration', type=float)
     round_cmd.add_argument('--limit', '-n', type=int)
     round_cmd.add_argument('--max-replies', type=int)
@@ -162,12 +203,17 @@ async def _cmd_game(args, config):
         await observe(config, args.chat, include_self=args.include_self, timeout=args.timeout)
         return
     if args.game_command == 'suggest':
-        data = await codex_context(config, args.chat, args.limit, operator=args.operator)
+        profile = _resolve_profile(config, args.preset)
+        game_config = _copy_config_with_game_settings(config, profile)
+        data = await codex_context(
+            game_config, args.chat, args.limit,
+            operator=args.operator, preset=args.preset)
         if args.json:
             print(dumps_json(data))
         else:
             print('Chat: {title} (id={id})'.format(**data['chat']))
             print('Operator: {}'.format(data['operator']))
+            print('Preset: {}'.format(data['preset'] or 'default'))
             print('Profile: {}'.format(data['profile']))
             print('Recent messages:')
             for item in data['messages']:
@@ -176,48 +222,26 @@ async def _cmd_game(args, config):
             print(data['instruction'])
         return
     if args.game_command == 'round':
-        round_config = config.round
+        profile = _resolve_profile(config, args.preset)
+        round_config = _round_with_cli_overrides(
+            _resolve_round(config, args.preset), args)
+        game_config = _copy_config_with_game_settings(config, profile, round_config)
         await interactive_round(
-            config, args.chat,
-            duration=args.duration if args.duration is not None else round_config['duration'],
-            limit=args.limit if args.limit is not None else round_config['limit'],
-            max_replies=args.max_replies if args.max_replies is not None else round_config['max_replies'],
+            game_config, args.chat,
+            duration=round_config['duration'],
+            limit=round_config['limit'],
+            max_replies=round_config['max_replies'],
             include_self=args.include_self,
-            quiet_context=(
-                args.quiet_context if args.quiet_context is not None
-                else round_config['quiet_context']),
-            min_reply_interval=(
-                args.min_reply_interval
-                if args.min_reply_interval is not None
-                else round_config['min_reply_interval']),
-            end_buffer=(
-                args.end_buffer if args.end_buffer is not None
-                else round_config['end_buffer']),
-            reply_probability=(
-                args.reply_probability
-                if args.reply_probability is not None
-                else round_config['reply_probability']),
-            mention_reply_probability=(
-                args.mention_reply_probability
-                if args.mention_reply_probability is not None
-                else round_config['mention_reply_probability']),
-            random_delay_min=(
-                args.random_delay_min
-                if args.random_delay_min is not None
-                else round_config['random_delay_min']),
-            random_delay_max=(
-                args.random_delay_max
-                if args.random_delay_max is not None
-                else round_config['random_delay_max']),
-            skip_short_ack=(
-                args.skip_short_ack if args.skip_short_ack is not None
-                else round_config['skip_short_ack']),
-            merge_window=(
-                args.merge_window if args.merge_window is not None
-                else round_config['merge_window']),
-            split_long_replies=(
-                args.split_long_replies if args.split_long_replies is not None
-                else round_config['split_long_replies']))
+            quiet_context=round_config['quiet_context'],
+            min_reply_interval=round_config['min_reply_interval'],
+            end_buffer=round_config['end_buffer'],
+            reply_probability=round_config['reply_probability'],
+            mention_reply_probability=round_config['mention_reply_probability'],
+            random_delay_min=round_config['random_delay_min'],
+            random_delay_max=round_config['random_delay_max'],
+            skip_short_ack=round_config['skip_short_ack'],
+            merge_window=round_config['merge_window'],
+            split_long_replies=round_config['split_long_replies'])
         return
     raise AssertionError(args.game_command)
 

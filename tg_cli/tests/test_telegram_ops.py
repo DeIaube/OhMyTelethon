@@ -68,9 +68,10 @@ def test_codex_context_includes_full_profile_and_operator(monkeypatch, tmp_path)
     })
 
     data = asyncio.run(telegram_ops.codex_context(
-        config, '5217114569', 20, operator='Claude'))
+        config, '5217114569', 20, operator='Claude', preset='casual'))
 
     assert data['operator'] == 'Claude'
+    assert data['preset'] == 'casual'
     assert data['profile']['style'] == 'brief'
     assert data['profile']['language'] == '中文'
     assert data['profile']['max_chars'] == 80
@@ -175,4 +176,45 @@ def test_round_reply_parts_respects_config(tmp_path):
     assert telegram_ops._round_reply_parts(config, '一二三四五六') == [
         '一二三',
         '四五六',
+    ]
+
+
+def test_round_report_tracks_and_formats_summary():
+    report = telegram_ops.RoundReport(duration=60)
+
+    report.record_batch(2)
+    report.record_batch(1)
+    report.record_prompt()
+    report.record_prompt()
+    report.record_skip('probability')
+    report.record_skip('probability')
+    report.record_skip('empty_input')
+    report.record_sent_message(101)
+    report.record_sent_message(102)
+    report.record_sent_reply()
+    report.finish(12.345)
+
+    assert report.as_dict() == {
+        'duration': 60.0,
+        'elapsed': 12.345,
+        'received_batches': 2,
+        'received_messages': 3,
+        'prompted': 2,
+        'sent_replies': 1,
+        'sent_message_ids': [101, 102],
+        'skip_reasons': {
+            'probability': 2,
+            'empty_input': 1,
+        },
+    }
+    assert telegram_ops._format_round_report(report) == [
+        'Round report:',
+        'duration=60.0s',
+        'elapsed=12.3s',
+        'received_batches=2',
+        'received_messages=3',
+        'prompted=2',
+        'sent_replies=1',
+        'sent_message_ids=101,102',
+        'skip_reasons={"empty_input": 1, "probability": 2}',
     ]

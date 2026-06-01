@@ -18,17 +18,20 @@ Current capabilities:
 - `tg-cli pause` / `tg-cli resume` / `tg-cli status`: manage write safety state.
 - `tg-cli game observe <chat>`: observe live messages.
 - `tg-cli game suggest <chat>`: print an agent-ready context bundle, including the resolved profile, without sending.
-- `tg-cli game suggest <chat> --operator claude`: render the context instruction for a named external operator such as Codex or Claude.
+- `tg-cli game suggest <chat> --preset casual --operator claude`: render the context instruction for a named external operator such as Codex or Claude with a named preset overlay.
 - `tg-cli game round <chat> --duration 60 --max-replies 8`: run a bounded interactive chat round where the current agent/operator supplies replies and the CLI sends them through the safety layer.
+- `tg-cli game round <chat> --preset public_group_safe`: run a bounded round with a named preset overlay.
 - `tg-cli game round <chat> --quiet-context --min-reply-interval 2 --end-buffer 5`: run the compact one-minute operator loop with repeated context reduced, send spacing, and an end-of-round buffer.
 - `tg-cli game round <chat> --reply-probability 0.7 --random-delay-min 1 --random-delay-max 4 --skip-short-ack --merge-window 2`: make the bounded operator loop less mechanical without entering daemon/auto mode.
 - `tg-cli game round <chat> --split-long-replies`: split long typed replies into several safe, audited Telegram messages.
+- `game round` prints a structured report at exit with elapsed time, received batch/message counts, prompted count, sent reply/message ids, and skip reasons.
 
 Profile config:
 
 - `profile.style`, `profile.language`, `profile.max_chars`, `profile.emoji_level`, `profile.avoid_topics`, `profile.forbidden_terms`, and `profile.reply_policy` have safe defaults in `tg_cli.config`.
 - `round.*` has defaults in `tg_cli.config`; command flags should override config values only when explicitly passed.
-- `game suggest` must include the full resolved profile and the selected operator name.
+- Top-level `presets` can contain named `profile` and `round` overlays. `game suggest` and `game round` select them with `--preset NAME`; command flags still override preset round values.
+- `game suggest` must include the selected preset name, the full resolved profile, and the selected operator name.
 - `game round` must show profile guidance before asking the operator for a reply.
 
 Safety rules:
@@ -42,7 +45,7 @@ Safety rules:
 - Long reply splitting must keep every message part inside the same write safety checks and audit behavior.
 - Audit logs must not store raw message text, API hash, phone number, or session bytes.
 - Avoid concurrent `tg-cli` commands on the same Telethon session file during live rounds; the session is SQLite-backed and single-writer behavior can lock concurrent commands.
-- Keep auto/daemon behavior out of v0.2; use bounded `game round` for live tests.
+- Keep auto/daemon behavior out of v0.3; use bounded `game round` for live tests.
 - If CLI behavior, commands, safety rules, config, or file layout changes, update this file and the relevant `tg_cli/` documentation in the same change.
 
 Local test command:

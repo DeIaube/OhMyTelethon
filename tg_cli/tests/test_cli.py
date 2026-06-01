@@ -3,6 +3,7 @@ import sqlite3
 from types import SimpleNamespace
 
 from tg_cli import cli
+from tg_cli.config import AppConfig
 
 
 def test_status_json_does_not_require_credentials(tmp_path, monkeypatch, capsys):
@@ -84,6 +85,7 @@ def test_game_round_parser_defaults():
     assert args.limit is None
     assert args.max_replies is None
     assert args.include_self is False
+    assert args.preset is None
     assert args.reply_probability is None
     assert args.mention_reply_probability is None
     assert args.random_delay_min is None
@@ -99,6 +101,7 @@ def test_game_suggest_parser_accepts_operator():
 
     args = parser.parse_args([
         'game', 'suggest', '5217114569',
+        '--preset', 'casual',
         '--operator', 'claude',
         '--json',
     ])
@@ -106,6 +109,7 @@ def test_game_suggest_parser_accepts_operator():
     assert args.command == 'game'
     assert args.game_command == 'suggest'
     assert args.chat == '5217114569'
+    assert args.preset == 'casual'
     assert args.operator == 'claude'
     assert args.json is True
 
@@ -115,6 +119,7 @@ def test_game_round_parser_humanization_flags():
 
     args = parser.parse_args([
         'game', 'round', '5217114569',
+        '--preset', 'casual',
         '--reply-probability', '0.4',
         '--mention-reply-probability', '0.9',
         '--random-delay-min', '1.5',
@@ -123,6 +128,7 @@ def test_game_round_parser_humanization_flags():
         '--merge-window', '2',
     ])
 
+    assert args.preset == 'casual'
     assert args.reply_probability == 0.4
     assert args.mention_reply_probability == 0.9
     assert args.random_delay_min == 1.5
@@ -192,3 +198,90 @@ def test_game_round_uses_config_defaults_when_flags_are_omitted(monkeypatch):
     assert seen['skip_short_ack'] is True
     assert seen['merge_window'] == 2.0
     assert seen['split_long_replies'] is True
+
+
+def test_game_round_applies_preset_then_cli_flags(monkeypatch, tmp_path):
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        'game', 'round', '5217114569',
+        '--preset', 'casual',
+        '--duration', '15',
+        '--max-replies', '2',
+    ])
+    seen = {}
+
+    async def fake_interactive_round(config, chat, **kwargs):
+        seen['config'] = config
+        seen['chat'] = chat
+        seen.update(kwargs)
+
+    monkeypatch.setattr(cli, 'interactive_round', fake_interactive_round)
+    config = AppConfig(
+        api_id=1,
+        api_hash='hash',
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        profile={'style': 'global style'},
+        round_config={'duration': 120, 'max_replies': 8},
+        presets={
+            'casual': {
+                'profile': {'style': 'casual style', 'max_chars': 42},
+                'round': {'duration': 60, 'reply_probability': 0.25},
+            },
+        })
+
+    cli._run(cli._cmd_game(args, config))
+
+    assert seen['chat'] == '5217114569'
+    assert seen['duration'] == 15.0
+    assert seen['max_replies'] == 2
+    assert seen['reply_probability'] == 0.25
+    assert seen['config'].profile['style'] == 'casual style'
+    assert seen['config'].profile['max_chars'] == 42
+    assert seen['config'].round['duration'] == 15.0
+    assert config.profile['style'] == 'global style'
+    assert config.round['duration'] == 120.0
+
+
+def test_game_suggest_json_applies_preset(monkeypatch, tmp_path, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        'game', 'suggest', '5217114569',
+        '--preset', 'casual',
+        '--operator', 'codex',
+        '--json',
+    ])
+
+    async def fake_codex_context(config, chat, limit, operator='agent', preset=None):
+        return {
+            'chat': {'id': int(chat), 'title': 'test chat'},
+            'operator': operator,
+            'preset': preset,
+            'profile': dict(config.profile),
+            'messages': [],
+            'instruction': 'instruction',
+        }
+
+    monkeypatch.setattr(cli, 'codex_context', fake_codex_context)
+    config = AppConfig(
+        api_id=1,
+        api_hash='hash',
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        profile={'style': 'global style'},
+        presets={
+            'casual': {
+                'profile': {'style': 'casual style'},
+            },
+        })
+
+    cli._run(cli._cmd_game(args, config))
+
+    data = json.loads(capsys.readouterr().out)
+    assert data['operator'] == 'codex'
+    assert data['preset'] == 'casual'
+    assert data['profile']['style'] == 'casual style'
