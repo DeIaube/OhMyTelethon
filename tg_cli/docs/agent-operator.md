@@ -131,7 +131,7 @@ tg-cli quota status --json
 Expected flow:
 
 - Run `quota status --json` before starting the loop to see `target_count`, `sent_count`, `remaining_count`, and per-chat status.
-- Run `quota next --json` to claim one task from the next active target chat. The payload should include bounded recent context and resolved `profile`, `persona`, `reply_policy`, `initiative`, and `preset`.
+- Run `quota next --json` to claim one task from the next active target chat. The payload should include bounded recent context and resolved `profile`, `persona`, `reply_policy`, `initiative`, `round`, and `preset`.
 - Decide outside the CLI whether a normal person would reply, skip, or wait. The CLI still does not call Codex, Claude, OpenAI, Anthropic, or any model provider.
 - Use `quota reply <task_id> "..." --dry-run --json` for a new group, new preset, or suspicious context. Dry-run validates whitelist, `pause`, forbidden terms, and audit behavior without sending, consuming the task, or incrementing counts.
 - Use `quota reply <task_id> "..." --json` only when the message is natural and still relevant. If reply splitting is enabled, each sent Telegram message part is counted separately.
@@ -142,11 +142,12 @@ Counting rules:
 - Only successful Telegram sends increment the target's `sent_count`.
 - A split reply counts by actual sent Telegram message parts.
 - Dry-run replies never increment counts.
+- `quota reply` honors `daemon.min_reply_interval`, `daemon.max_messages_per_hour`, and `daemon.max_consecutive_replies`.
 - Once a target reaches its count, that chat becomes `done` for the active run.
 - Once all targets are done, the whole run becomes `done`.
-- `quota stop` changes an active run to `stopped`; it does not delete audit records or sent message ids.
+- `quota stop` changes an active run to `stopped`; it does not delete audit records or sent message ids. In-flight sends that already passed the final safety gate may still be counted if Telegram accepted them.
 
-Quota state is local runtime data. The default file is `tg_cli/.tg-cli-quota-state.json`, or `quota.state_path` in local config. It is ignored by git and may contain bounded task context, run metadata, target counts, task ids, and sent message ids. Do not commit it or use it as a durable database. If you need a fresh day, start a new quota run rather than editing the state file by hand.
+Quota state is local runtime data. The default file is `tg_cli/.tg-cli-quota-state.json`, or `quota.state_path` in local config. It, its lock file, and atomic-write temp files are ignored by git and may contain bounded task context, run metadata, target counts, task ids, and sent message ids. Do not commit them or use the state file as a durable database. If you need a fresh day, start a new quota run rather than editing the state file by hand.
 
 Quota mode is separate from daemon mode: daemon remains a foreground single-chat queue, while quota mode is a multi-chat target-count flow started by external automation. Avoid running multiple Telegram-writing commands against the same Telethon session at the same time.
 

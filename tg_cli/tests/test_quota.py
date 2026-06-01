@@ -163,6 +163,44 @@ def test_create_task_refuses_unknown_done_or_stopped_targets(tmp_path):
     assert quota.create_task(state_path, 111, now=LATER) is None
 
 
+def test_create_task_reuses_existing_pending_task_for_target(tmp_path):
+    state_path = tmp_path / 'quota-state.json'
+    quota.create_run(state_path, [(111, 2)], now=NOW)
+
+    first = quota.create_task(state_path, 111, context={'n': 1}, now=NOW)
+    second = quota.create_task(state_path, 111, context={'n': 2}, now=LATER)
+    state = quota.get_status(state_path)
+
+    assert second == first
+    assert len(state['tasks']) == 1
+    assert state['tasks'][0]['context'] == {'n': 1}
+
+
+def test_begin_task_reserves_capacity_and_blocks_second_sender(tmp_path):
+    state_path = tmp_path / 'quota-state.json'
+    quota.create_run(state_path, [(111, 1)], now=NOW)
+    task = quota.create_task(state_path, 111, now=NOW)
+
+    begun = quota.begin_task(
+        state_path, task['id'], expected_message_count=1, now=LATER)
+
+    assert begun['status'] == 'sending'
+    assert begun['expected_message_count'] == 1
+    assert quota.begin_task(
+        state_path, task['id'], expected_message_count=1, now=LATER) is None
+    assert quota.create_task(state_path, 111, now=LATER)['id'] == task['id']
+
+
+def test_begin_task_refuses_to_exceed_remaining_capacity(tmp_path):
+    state_path = tmp_path / 'quota-state.json'
+    quota.create_run(state_path, [(111, 1)], now=NOW)
+    task = quota.create_task(state_path, 111, now=NOW)
+
+    assert quota.begin_task(
+        state_path, task['id'], expected_message_count=2, now=LATER) is None
+    assert quota.get_task(state_path, task['id'])['status'] == 'pending'
+
+
 def test_complete_task_counts_split_message_ids_and_marks_run_done(tmp_path):
     state_path = tmp_path / 'quota-state.json'
     quota.create_run(state_path, [(111, 2)], now=NOW)
@@ -205,6 +243,44 @@ def test_complete_task_dry_run_does_not_count_or_consume_task(tmp_path):
     assert state['targets'][0]['sent_count'] == 0
     assert state['targets'][0]['status'] == 'active'
     assert state['targets'][0]['message_ids'] == []
+
+
+def test_complete_task_refuses_to_overcount_stale_pending_task(tmp_path):
+    state_path = tmp_path / 'quota-state.json'
+    quota.create_run(state_path, [(111, 1), (222, 1)], now=NOW)
+    first = quota.create_task(state_path, 111, now=NOW)
+    second = dict(first)
+    second['id'] = 'stale-second-task'
+    second['status'] = 'pending'
+    state = quota.get_status(state_path)
+    state['tasks'].append(second)
+    quota.save_state(state_path, state)
+
+    assert quota.complete_task(
+        state_path, first['id'], message_ids=[10], now=LATER)['status'] == 'completed'
+    assert quota.complete_task(
+        state_path, 'stale-second-task', message_ids=[11], now=LATER) is None
+    state = quota.get_status(state_path)
+    assert state['targets'][0]['sent_count'] == 1
+    assert state['targets'][0]['message_ids'] == [10]
+
+
+def test_complete_task_counts_in_flight_send_after_stop(tmp_path):
+    state_path = tmp_path / 'quota-state.json'
+    quota.create_run(state_path, [(111, 1)], now=NOW)
+    task = quota.create_task(state_path, 111, now=NOW)
+    quota.begin_task(
+        state_path, task['id'], expected_message_count=1, now=NOW)
+    quota.stop_run(state_path, now=LATER)
+
+    completed = quota.complete_task(
+        state_path, task['id'], message_ids=[10], now=LATER)
+    state = quota.get_status(state_path)
+
+    assert completed['status'] == 'completed'
+    assert state['status'] == 'stopped'
+    assert state['targets'][0]['sent_count'] == 1
+    assert state['targets'][0]['status'] == 'done'
 
 
 def test_run_is_done_only_after_all_targets_are_done(tmp_path):

@@ -1409,12 +1409,23 @@ def _daemon_task_prompt(profile, persona, reply_policy, round_config=None):
 
 def _task_config(base_config, task):
     task_config = copy.copy(base_config)
-    task_config.profile = task.get('profile') or getattr(base_config, 'profile', {})
-    task_config.persona = task.get('persona') or getattr(base_config, 'persona', {})
+    context = task.get('context') or {}
+    if not isinstance(context, dict):
+        context = {}
+    task_config.profile = (
+        task.get('profile') or context.get('profile') or
+        getattr(base_config, 'profile', {}))
+    task_config.persona = (
+        task.get('persona') or context.get('persona') or
+        getattr(base_config, 'persona', {}))
     task_config.reply_policy = (
-        task.get('reply_policy') or getattr(base_config, 'reply_policy', {}))
+        task.get('reply_policy') or context.get('reply_policy') or
+        getattr(base_config, 'reply_policy', {}))
     task_config.initiative = (
-        task.get('initiative') or getattr(base_config, 'initiative', {}))
+        task.get('initiative') or context.get('initiative') or
+        getattr(base_config, 'initiative', {}))
+    if task.get('round') is not None or context.get('round') is not None:
+        task_config.round = task.get('round') or context.get('round') or {}
     return task_config
 
 
@@ -1547,6 +1558,16 @@ def _quota_complete_task(config, task_id, message_ids, dry_run=False):
         dry_run=bool(dry_run))
 
 
+def _quota_begin_task(config, task_id, expected_message_count):
+    store = _quota_module()
+    begin_task = getattr(store, 'begin_task', None)
+    if begin_task is None:
+        return _quota_get_task(config, task_id)
+    return _quota_invoke(
+        config, begin_task, task_id,
+        expected_message_count=int(expected_message_count))
+
+
 def _quota_run_status(status):
     if not status:
         return ''
@@ -1627,7 +1648,7 @@ def _quota_assert_task_sendable(task, task_id):
     if not task:
         raise TelegramCliError('Quota task not found: {}'.format(task_id))
     task_status = str(task.get('status') or 'pending').strip().lower()
-    if task_status in ('stopped', 'done', 'completed', 'skipped'):
+    if task_status != 'pending':
         raise TelegramCliError(
             'Quota task {} is {}; cannot send.'.format(task_id, task_status))
 
@@ -1641,6 +1662,55 @@ def _quota_preset_name(config, status=None):
         getattr(config, 'preset_name', None)
         or (status or {}).get('preset')
         or None)
+
+
+def _quota_config_with_preset(config, preset_name):
+    if preset_name in (None, ''):
+        return config
+    if not hasattr(config, 'resolve_profile'):
+        return config
+    resolved = copy.copy(config)
+    resolved.profile = config.resolve_profile(preset_name)
+    resolved.round = config.resolve_round(preset_name)
+    resolved.daemon = config.resolve_daemon(preset_name)
+    resolved.reply_policy = config.resolve_reply_policy(preset_name)
+    resolved.initiative = config.resolve_initiative(preset_name)
+    resolved.persona = config.resolve_persona(preset_name)
+    resolved.preset_name = preset_name
+    return resolved
+
+
+def _quota_reply_counts(status, chat_id, now=None):
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    hourly = 0
+    consecutive = 0
+    counting_consecutive = True
+    for task in reversed((status or {}).get('tasks') or []):
+        chat = _quota_task_chat(task)
+        if int(chat.get('id') or 0) != int(chat_id):
+            continue
+        task_status = str(task.get('status') or '').lower()
+        updated_at = _daemon_parse_time(task.get('updated_at')) or now
+        if task_status == 'completed' and task.get('message_ids'):
+            count = len(task.get('message_ids') or []) or 1
+            if (now - updated_at).total_seconds() <= 3600:
+                hourly += count
+            if counting_consecutive:
+                consecutive += count
+            continue
+        if task_status in ('pending', 'sending'):
+            continue
+        counting_consecutive = False
+    return hourly, consecutive
+
+
+def _quota_reply_interval_delay(target, min_reply_interval, now=None):
+    last_sent_at = _daemon_parse_time((target or {}).get('last_sent_at'))
+    if last_sent_at is None:
+        return 0.0
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    elapsed = (now - last_sent_at).total_seconds()
+    return max(0.0, float(min_reply_interval or 0.0) - elapsed)
 
 
 async def quota_next_context(config, limit=12, operator='agent'):
@@ -1661,13 +1731,14 @@ async def quota_next_context(config, limit=12, operator='agent'):
     _quota_assert_target_active(target, chat_id)
 
     preset = _quota_preset_name(config, status)
+    effective_config = _quota_config_with_preset(config, preset)
     async with _client(config) as client:
         entity, row = await resolve_chat(client, chat_id)
         safety.require_allowed_chat(config, row['id'])
         messages = await _recent_context_lines(client, entity, limit)
 
     context = summarize_group_context(
-        config, row, messages, operator=operator, preset=preset,
+        effective_config, row, messages, operator=operator, preset=preset,
         tail_limit=limit)
     task_context = {
         'chat': copy.deepcopy(row),
@@ -1677,9 +1748,11 @@ async def quota_next_context(config, limit=12, operator='agent'):
         'persona': copy.deepcopy(context['persona']),
         'reply_policy': copy.deepcopy(context['reply_policy']),
         'initiative': copy.deepcopy(context['initiative']),
+        'round': copy.deepcopy(getattr(effective_config, 'round', {}) or {}),
         'prompt': _daemon_task_prompt(
             context['profile'], context['persona'],
-            context['reply_policy'], getattr(config, 'round', {}) or {}),
+            context['reply_policy'],
+            getattr(effective_config, 'round', {}) or {}),
         'messages': copy.deepcopy(context['messages_tail']),
         'context_summary': _task_context_summary(context),
         'quota': {
@@ -1697,7 +1770,6 @@ async def quota_next_context(config, limit=12, operator='agent'):
 
 
 async def quota_reply(config, task_id, text, dry_run=False):
-    config.require_credentials()
     reply = (text or '').strip()
     if not reply:
         raise TelegramCliError('Reply text must not be empty.')
@@ -1706,7 +1778,9 @@ async def quota_reply(config, task_id, text, dry_run=False):
     _quota_assert_run_active(status)
     task = _quota_get_task(config, task_id)
     _quota_assert_task_sendable(task, task_id)
-    task_config = _quota_task_config(config, task)
+    preset = _quota_preset_name(config, status)
+    task_config = _quota_task_config(
+        _quota_config_with_preset(config, preset), task)
     chat = _quota_task_chat(task)
     chat_id = chat.get('id')
     if chat_id is None:
@@ -1714,13 +1788,54 @@ async def quota_reply(config, task_id, text, dry_run=False):
     target = _quota_find_target(status, chat_id)
     _quota_assert_target_active(target, chat_id)
 
+    if dry_run:
+        safety.require_can_write(task_config, chat_id)
+        matches = safety.find_forbidden_terms(task_config, reply)
+        if matches:
+            safety.audit_record(
+                task_config, 'quota_reply_send', chat_id,
+                chat_title=chat.get('title'), text=reply, dry_run=True,
+                status='blocked_forbidden_terms')
+            raise safety.SafetyError(
+                'Message contains forbidden/sensitive profile term(s): {}.'.format(
+                    ', '.join(matches)))
+        reply_parts = _round_reply_parts(task_config, reply)
+        if not reply_parts:
+            raise TelegramCliError('Reply text must not be empty.')
+        for part in reply_parts:
+            safety.require_text_allowed(task_config, part)
+        remaining = _quota_target_remaining(target)
+        if len(reply_parts) > remaining:
+            raise TelegramCliError(
+                'Quota reply would exceed remaining target for chat {}: '
+                '{} part(s) for {} remaining.'.format(
+                    chat_id, len(reply_parts), remaining))
+        safety.audit_record(
+            task_config, 'quota_reply_send', chat_id,
+            chat_title=chat.get('title'), text=reply, dry_run=True,
+            status='dry_run')
+        return {
+            'sent': False,
+            'dry_run': True,
+            'task_id': task_id,
+            'chat': chat,
+            'message_ids': [],
+            'parts': reply_parts,
+        }
+
+    config.require_credentials()
     async with _client(config) as client:
         entity, row = await resolve_chat(client, chat_id)
-        target = _quota_find_target(_quota_status(config), row['id'])
+        current_status = _quota_status(config)
+        _quota_assert_run_active(current_status)
+        target = _quota_find_target(current_status, row['id'])
         _quota_assert_target_active(target, row['id'])
         current_task = _quota_get_task(config, task_id)
         _quota_assert_task_sendable(current_task, task_id)
-        task_config = _quota_task_config(config, current_task)
+        task_config = _quota_task_config(
+            _quota_config_with_preset(
+                config, _quota_preset_name(config, current_status)),
+            current_task)
 
         safety.require_can_write(task_config, row['id'])
         matches = safety.find_forbidden_terms(task_config, reply)
@@ -1746,19 +1861,34 @@ async def quota_reply(config, task_id, text, dry_run=False):
                 '{} part(s) for {} remaining.'.format(
                     row['id'], len(reply_parts), remaining))
 
-        if dry_run:
-            safety.audit_record(
-                task_config, 'quota_reply_send', row['id'],
-                chat_title=row['title'], text=reply, dry_run=True,
-                status='dry_run')
-            return {
-                'sent': False,
-                'dry_run': True,
-                'task_id': task_id,
-                'chat': row,
-                'message_ids': [],
-                'parts': reply_parts,
-            }
+        daemon_config = getattr(task_config, 'daemon', {}) or {}
+        now_dt = _dt.datetime.now(_dt.timezone.utc)
+        hourly, consecutive = _quota_reply_counts(
+            current_status, row['id'], now=now_dt)
+        if hourly + len(reply_parts) > int(daemon_config.get(
+                'max_messages_per_hour', 20)):
+            raise TelegramCliError(
+                'Quota hourly message limit reached for chat {}.'.format(
+                    row['id']))
+        if consecutive + len(reply_parts) > int(daemon_config.get(
+                'max_consecutive_replies', 2)):
+            raise TelegramCliError(
+                'Quota consecutive reply limit reached for chat {}.'.format(
+                    row['id']))
+        delay = _quota_reply_interval_delay(
+            target, daemon_config.get('min_reply_interval', 6.0),
+            now=now_dt)
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+        begun = _quota_begin_task(config, task_id, len(reply_parts))
+        if begun is None:
+            raise TelegramCliError(
+                'Quota task {} is no longer sendable.'.format(task_id))
+        current_status = _quota_status(config)
+        _quota_assert_run_active(current_status)
+        target = _quota_find_target(current_status, row['id'])
+        _quota_assert_target_active(target, row['id'])
 
         sent_ids = []
         try:

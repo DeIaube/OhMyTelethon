@@ -4,11 +4,12 @@ from types import SimpleNamespace
 
 from tg_cli.config import AppConfig
 from tg_cli import daemon
+from tg_cli import safety
 from tg_cli import telegram_ops
 import pytest
 
 
-def make_config(tmp_path, profile=None):
+def make_config(tmp_path, profile=None, presets=None):
     return AppConfig(
         api_id=1,
         api_hash='hash',
@@ -17,6 +18,7 @@ def make_config(tmp_path, profile=None):
         state_path=tmp_path / '.tg-cli-state.json',
         audit_log_path=tmp_path / 'tg-cli.audit.log',
         profile=profile,
+        presets=presets,
         daemon_config={
             'queue_path': str(tmp_path / 'queue.json'),
             'lock_path': str(tmp_path / 'daemon.lock'),
@@ -63,6 +65,15 @@ class FakeQuotaStore:
 
     def get_task(self, path, task_id):
         if self.task and self.task.get('id') == task_id:
+            return copy.deepcopy(self.task)
+        return None
+
+    def begin_task(self, path, task_id, expected_message_count=1):
+        if self.task and self.task.get('id') == task_id:
+            if self.task.get('status') != 'pending':
+                return None
+            self.task['status'] = 'sending'
+            self.task['expected_message_count'] = int(expected_message_count)
             return copy.deepcopy(self.task)
         return None
 
@@ -256,8 +267,21 @@ def test_task_context_summary_drops_raw_message_tail(tmp_path):
 
 def test_quota_next_context_creates_task_with_recent_context(
         tmp_path, monkeypatch):
-    config = make_config(tmp_path)
-    config.preset_name = 'chat_social'
+    config = make_config(
+        tmp_path,
+        presets={
+            'chat_social': {
+                'profile': {
+                    'style': 'preset style',
+                    'forbidden_terms': ['blocked'],
+                },
+                'round': {
+                    'split_long_replies': True,
+                    'split_max_chars': 4,
+                },
+                'persona': {'identity': 'preset persona'},
+            },
+        })
     quota = FakeQuotaStore({
         'run_id': 'quota-1',
         'status': 'active',
@@ -298,6 +322,10 @@ def test_quota_next_context_creates_task_with_recent_context(
     assert data['context']['chat']['title'] == 'quota chat'
     assert data['context']['operator'] == 'codex'
     assert data['context']['preset'] == 'chat_social'
+    assert data['context']['profile']['style'] == 'preset style'
+    assert data['context']['profile']['forbidden_terms'] == ['blocked']
+    assert data['context']['persona']['identity'] == 'preset persona'
+    assert data['context']['round']['split_long_replies'] is True
     assert data['context']['quota']['remaining'] == 2
     assert data['context']['messages'][-1]['text'] == '开黑开黑'
     assert 'prompt' in data['context']
@@ -345,6 +373,53 @@ def test_quota_reply_dry_run_validates_without_completing_or_sending(
     assert fake_client.sent_texts == []
     assert quota.completed == []
     assert quota.get_task(config.quota['state_path'], 'quota-task-1')['status'] == 'pending'
+
+
+def test_quota_reply_dry_run_uses_task_context_profile_without_credentials(
+        tmp_path, monkeypatch):
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        quota_config={'state_path': str(tmp_path / 'quota.json')},
+    )
+    task = {
+        'id': 'quota-task-1',
+        'status': 'pending',
+        'chat_id': 5217114569,
+        'context': {
+            'profile': {'forbidden_terms': ['禁词']},
+            'round': {
+                'split_long_replies': True,
+                'split_max_chars': 4,
+                'split_max_parts': 3,
+            },
+        },
+    }
+    quota = FakeQuotaStore({
+        'run_id': 'quota-1',
+        'status': 'active',
+        'targets': [{
+            'chat_id': 5217114569,
+            'target_count': 5,
+            'sent_count': 0,
+            'status': 'active',
+        }],
+    }, task=task)
+
+    monkeypatch.setattr(telegram_ops, 'quota_store', quota)
+
+    with pytest.raises(safety.SafetyError, match='禁词'):
+        asyncio.run(telegram_ops.quota_reply(
+            config, 'quota-task-1', '这里有禁词', dry_run=True))
+
+    result = asyncio.run(telegram_ops.quota_reply(
+        config, 'quota-task-1', '一二三四五六七八', dry_run=True))
+    assert result['parts'] == ['一二三四', '五六七八']
+    assert quota.completed == []
 
 
 def test_quota_reply_sends_split_parts_and_counts_actual_message_ids(
@@ -395,6 +470,146 @@ def test_quota_reply_sends_split_parts_and_counts_actual_message_ids(
     target = quota.get_status(config.quota['state_path'])['targets'][0]
     assert target['sent_count'] == 2
     assert target['status'] == 'done'
+
+
+def test_quota_reply_blocks_hourly_limit_without_sending(
+        tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    config.daemon['max_messages_per_hour'] = 1
+    task = {
+        'id': 'quota-task-1',
+        'status': 'pending',
+        'chat_id': 5217114569,
+        'profile': {},
+    }
+    quota = FakeQuotaStore({
+        'run_id': 'quota-1',
+        'status': 'active',
+        'targets': [{
+            'chat_id': 5217114569,
+            'target_count': 3,
+            'sent_count': 1,
+            'status': 'active',
+        }],
+        'tasks': [{
+            'id': 'completed-task',
+            'status': 'completed',
+            'chat_id': 5217114569,
+            'updated_at': telegram_ops._dt.datetime.now(
+                telegram_ops._dt.timezone.utc).isoformat(),
+            'message_ids': [99],
+        }],
+    }, task=task)
+    fake_client = FakeTelegramClient()
+
+    async def fake_resolve_chat(client, chat):
+        return 'entity', {'id': 5217114569, 'title': 'quota chat'}
+
+    monkeypatch.setattr(telegram_ops, 'quota_store', quota)
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+
+    with pytest.raises(telegram_ops.TelegramCliError, match='hourly'):
+        asyncio.run(telegram_ops.quota_reply(
+            config, 'quota-task-1', '再来一句'))
+
+    assert fake_client.sent_texts == []
+    assert quota.completed == []
+
+
+def test_quota_reply_uses_preset_daemon_rate_limits(tmp_path, monkeypatch):
+    config = make_config(
+        tmp_path,
+        presets={
+            'chat_social': {
+                'daemon': {'max_messages_per_hour': 1},
+            },
+        })
+    config.daemon['max_messages_per_hour'] = 20
+    task = {
+        'id': 'quota-task-1',
+        'status': 'pending',
+        'chat_id': 5217114569,
+        'profile': {},
+    }
+    quota = FakeQuotaStore({
+        'run_id': 'quota-1',
+        'status': 'active',
+        'preset': 'chat_social',
+        'targets': [{
+            'chat_id': 5217114569,
+            'target_count': 3,
+            'sent_count': 1,
+            'status': 'active',
+        }],
+        'tasks': [{
+            'id': 'completed-task',
+            'status': 'completed',
+            'chat_id': 5217114569,
+            'updated_at': telegram_ops._dt.datetime.now(
+                telegram_ops._dt.timezone.utc).isoformat(),
+            'message_ids': [99],
+        }],
+    }, task=task)
+    fake_client = FakeTelegramClient()
+
+    async def fake_resolve_chat(client, chat):
+        return 'entity', {'id': 5217114569, 'title': 'quota chat'}
+
+    monkeypatch.setattr(telegram_ops, 'quota_store', quota)
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+
+    with pytest.raises(telegram_ops.TelegramCliError, match='hourly'):
+        asyncio.run(telegram_ops.quota_reply(
+            config, 'quota-task-1', '再来一句'))
+
+    assert fake_client.sent_texts == []
+    assert quota.completed == []
+
+
+def test_quota_reply_rechecks_run_after_begin_task(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    task = {
+        'id': 'quota-task-1',
+        'status': 'pending',
+        'chat_id': 5217114569,
+        'profile': {},
+    }
+
+    class StoppingQuotaStore(FakeQuotaStore):
+        def begin_task(self, path, task_id, expected_message_count=1):
+            begun = super().begin_task(
+                path, task_id,
+                expected_message_count=expected_message_count)
+            self.status_payload['status'] = 'stopped'
+            return begun
+
+    quota = StoppingQuotaStore({
+        'run_id': 'quota-1',
+        'status': 'active',
+        'targets': [{
+            'chat_id': 5217114569,
+            'target_count': 3,
+            'sent_count': 0,
+            'status': 'active',
+        }],
+    }, task=task)
+    fake_client = FakeTelegramClient()
+
+    async def fake_resolve_chat(client, chat):
+        return 'entity', {'id': 5217114569, 'title': 'quota chat'}
+
+    monkeypatch.setattr(telegram_ops, 'quota_store', quota)
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+
+    with pytest.raises(telegram_ops.TelegramCliError, match='stopped'):
+        asyncio.run(telegram_ops.quota_reply(
+            config, 'quota-task-1', '再来一句'))
+
+    assert fake_client.sent_texts == []
+    assert quota.completed == []
 
 
 def test_quota_reply_blocks_completed_target_without_sending(

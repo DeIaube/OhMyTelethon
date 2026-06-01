@@ -34,6 +34,7 @@ STOPPED_RUN_STATUS = 'stopped'
 ACTIVE_TARGET_STATUS = 'active'
 DONE_TARGET_STATUS = 'done'
 PENDING_TASK_STATUS = 'pending'
+SENDING_TASK_STATUS = 'sending'
 
 _STATE_THREAD_LOCKS = {}
 _STATE_THREAD_LOCKS_GUARD = threading.Lock()
@@ -342,6 +343,11 @@ def create_task(path, chat_id, context=None, now=None):
                 _target_remaining(target) <= 0):
             _save_state_unlocked(path, state)
             return None
+        for existing in state['tasks']:
+            if (int(existing.get('chat_id') or 0) == int(chat_id) and
+                    existing.get('status') in (
+                        PENDING_TASK_STATUS, SENDING_TASK_STATUS)):
+                return _deepcopy_json(existing)
         task = {
             'id': 'quota-task-{}-{}'.format(
                 _compact_timestamp(timestamp), uuid.uuid4().hex[:12]),
@@ -376,17 +382,46 @@ def _normalize_message_ids(message_ids):
         return [int(message_ids)]
 
 
-def complete_task(path, task_id, message_ids=None, dry_run=False, now=None):
+def begin_task(path, task_id, expected_message_count=1, now=None):
     with _locked_state(path):
         state = _load_state_unlocked(path)
         if state.get('status') != ACTIVE_RUN_STATUS:
             return None
         timestamp = _iso_utc(now)
-        message_ids = _normalize_message_ids(message_ids)
+        expected_message_count = _coerce_int(
+            expected_message_count, 'Quota expected message count')
+        if expected_message_count < 1:
+            raise ValueError('Quota expected message count must be positive.')
         for task in state['tasks']:
             if task.get('id') != task_id:
                 continue
             if task.get('status') != PENDING_TASK_STATUS:
+                return None
+            target = _find_target(state, task.get('chat_id'))
+            if (target is None or
+                    target.get('status') != ACTIVE_TARGET_STATUS or
+                    _target_remaining(target) < expected_message_count):
+                return None
+            task['status'] = SENDING_TASK_STATUS
+            task['updated_at'] = timestamp
+            task['sending_started_at'] = timestamp
+            task['expected_message_count'] = expected_message_count
+            state['updated_at'] = timestamp
+            _save_state_unlocked(path, state)
+            return _deepcopy_json(task)
+        return None
+
+
+def complete_task(path, task_id, message_ids=None, dry_run=False, now=None):
+    with _locked_state(path):
+        state = _load_state_unlocked(path)
+        timestamp = _iso_utc(now)
+        message_ids = _normalize_message_ids(message_ids)
+        for task in state['tasks']:
+            if task.get('id') != task_id:
+                continue
+            if task.get('status') not in (
+                    PENDING_TASK_STATUS, SENDING_TASK_STATUS):
                 return None
             target = _find_target(state, task.get('chat_id'))
             if target is None:
@@ -398,18 +433,24 @@ def complete_task(path, task_id, message_ids=None, dry_run=False, now=None):
                 checked['message_ids'] = message_ids
                 checked['sent_count_delta'] = 0
                 return checked
-            count_delta = 0 if dry_run else len(message_ids)
+            if (state.get('status') != ACTIVE_RUN_STATUS and
+                    task.get('status') != SENDING_TASK_STATUS):
+                return None
+            count_delta = len(message_ids)
+            if count_delta < 1:
+                return None
+            if _target_remaining(target) < count_delta:
+                return None
             task['status'] = 'completed'
             task['updated_at'] = timestamp
             task['completed_at'] = timestamp
-            task['dry_run'] = bool(dry_run)
+            task['dry_run'] = False
             task['message_ids'] = message_ids
             task['sent_count_delta'] = count_delta
-            if count_delta:
-                target['sent_count'] = int(target.get('sent_count', 0)) + count_delta
-                target['message_ids'] = list(target.get('message_ids') or [])
-                target['message_ids'].extend(message_ids)
-                target['last_sent_at'] = timestamp
+            target['sent_count'] = int(target.get('sent_count', 0)) + count_delta
+            target['message_ids'] = list(target.get('message_ids') or [])
+            target['message_ids'].extend(message_ids)
+            target['last_sent_at'] = timestamp
             _refresh_completion(state, timestamp)
             state['updated_at'] = timestamp
             _save_state_unlocked(path, state)

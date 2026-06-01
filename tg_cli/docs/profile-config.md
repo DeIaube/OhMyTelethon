@@ -130,7 +130,7 @@ For a credential-free starter file, see `tg_cli/docs/local-profile-template.json
 - `daemon.min_reply_interval`: Minimum seconds between successful daemon replies.
 - `daemon.max_messages_per_hour`: Per-daemon hourly outbound message cap.
 - `daemon.max_consecutive_replies`: Maximum consecutive account replies before another inbound message is required.
-- `quota.state_path`: Local JSON state file for the active quota run. The default is `.tg-cli-quota-state.json` under `tg_cli/`; keep it ignored by git.
+- `quota.state_path`: Local JSON state file for the active quota run. The default is `.tg-cli-quota-state.json` under `tg_cli/`; keep it, its lock file, and atomic-write temp files ignored by git.
 
 Unknown extra keys are preserved in `game suggest --json`, so operator-specific hints can be added without breaking older versions.
 
@@ -244,18 +244,19 @@ tg-cli quota reply <task_id> "这把先看看队友怎么说" --json
 tg-cli quota stop
 ```
 
-`quota.state_path` stores local runtime state for one active quota run: run id, run status, per-chat targets, sent counts, task ids, and sent Telegram message ids. It may include bounded recent context in tasks. Keep `.tg-cli-quota-state.json` ignored, do not commit it, and do not put credentials in it.
+`quota.state_path` stores local runtime state for one active quota run: run id, run status, per-chat targets, sent counts, task ids, and sent Telegram message ids. It may include bounded recent context in tasks. Keep `.tg-cli-quota-state.json`, its lock file, and atomic-write temp files ignored, do not commit them, and do not put credentials in them.
 
 Quota counting rules:
 
 - Count only successful Telegram sends.
 - Count split replies by actual sent Telegram message parts.
 - Do not increment counts for `--dry-run`.
+- Apply `daemon.min_reply_interval`, `daemon.max_messages_per_hour`, and `daemon.max_consecutive_replies` to quota replies.
 - Mark a target `done` when `sent_count` reaches `target_count`.
 - Mark the run `done` when all targets are done.
-- Mark the run `stopped` when `quota stop` is requested.
+- Mark the run `stopped` when `quota stop` is requested. In-flight sends that already passed the final safety gate may still be counted if Telegram accepted them.
 
-Quota safety is the same outbound safety stance as the rest of the CLI: target chats must be in `allowed_chats`, `pause` blocks `quota reply`, forbidden terms are checked before `client.send_message`, and audit logging records hashes and lengths instead of raw message text.
+Quota safety is the same outbound safety stance as the rest of the CLI: target chats must be in `allowed_chats`, `pause` blocks `quota reply`, forbidden terms are checked before `client.send_message`, daemon pacing limits apply, and audit logging records hashes and lengths instead of raw message text.
 
 ## Prompt Behavior
 

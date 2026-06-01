@@ -609,6 +609,18 @@ def test_quota_reply_dry_run_validates_without_completing_or_credentials(
     captured = {}
 
     class FakeQuotaStore:
+        def get_status(self, path):
+            return {
+                'run_id': 'quota-test',
+                'status': 'active',
+                'targets': [{
+                    'chat_id': 5217114569,
+                    'target_count': 1,
+                    'sent_count': 0,
+                    'status': 'active',
+                }],
+            }
+
         def get_task(self, path, task_id):
             captured['get_path'] = path
             captured['task_id'] = task_id

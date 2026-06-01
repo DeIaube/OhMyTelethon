@@ -120,7 +120,7 @@ Use quota mode when Codex automation owns the wall-clock trigger and `tg-cli` on
 tg-cli quota start --chat 111111111:120 --chat 222222222:300 --preset chat_social
 ```
 
-`quota start` creates or replaces the local quota run state with one target per `--chat CHAT_ID:COUNT`. The default state file is `tg_cli/.tg-cli-quota-state.json`, configurable as `quota.state_path` in `tg_cli/.tg-cli.json`. This file is ignored by git and is local runtime state, not source. It tracks the run id, status, target counts, sent counts, task ids, and sent Telegram message ids; it may also contain bounded task context, so do not commit or share it.
+`quota start` creates or replaces the local quota run state with one target per `--chat CHAT_ID:COUNT`. The default state file is `tg_cli/.tg-cli-quota-state.json`, configurable as `quota.state_path` in `tg_cli/.tg-cli.json`. This file, its lock file, and atomic-write temp files are ignored by git and are local runtime state, not source. The state tracks the run id, status, target counts, sent counts, task ids, and sent Telegram message ids; it may also contain bounded task context, so do not commit or share it.
 
 Codex, Claude, or another operator then works the quota run:
 
@@ -132,16 +132,17 @@ tg-cli quota reply <task_id> "这把先看看队友怎么说" --json
 tg-cli quota stop
 ```
 
-`quota next --json` selects the next active target chat, creates or claims one task, and returns bounded context plus resolved `profile`, `persona`, `reply_policy`, `initiative`, and `preset` guidance. `quota reply` sends one operator-written reply for that task. Use `--dry-run` for new groups or changed presets: it validates whitelist, pause, forbidden terms, and audit behavior without sending, consuming the task, or incrementing counts.
+`quota next --json` selects the next active target chat, creates or claims one task, and returns bounded context plus resolved `profile`, `persona`, `reply_policy`, `initiative`, `round`, and `preset` guidance. `quota reply` sends one operator-written reply for that task. Use `--dry-run` for new groups or changed presets: it validates whitelist, pause, forbidden terms, split/remaining-count behavior, and audit behavior without sending, consuming the task, or incrementing counts.
 
 Counting rules are deliberately strict:
 
 - Only successful Telegram sends increment `sent_count`.
 - If a natural reply is split into several Telegram messages, each successful part counts as one message.
 - Dry-run replies never increment counts.
+- `quota reply` also honors `daemon.min_reply_interval`, `daemon.max_messages_per_hour`, and `daemon.max_consecutive_replies` so automation loops cannot send faster than the configured safety limits.
 - When one chat reaches its target, that target becomes `done` and receives no more quota replies for the active run.
 - When every target is done, the run becomes `done`.
-- `quota stop` marks the run `stopped` and blocks new quota tasks and replies without deleting audit history.
+- `quota stop` marks the run `stopped` and blocks new quota tasks and replies without deleting audit history. In-flight sends that already passed the final safety gate may still be counted if Telegram accepted them.
 
 Quota mode is not a scheduler and does not call a model provider. It is the send/count state machine that a Codex automation can trigger daily. Keep one live quota operator flow per Telethon session so concurrent commands do not fight over the same local session file.
 

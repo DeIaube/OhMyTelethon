@@ -11,6 +11,7 @@ Default local CLI config, state, and audit files also live under `tg_cli/` and a
 - `tg_cli/.tg-cli-daemon-status.json`
 - `tg_cli/.tg-cli-daemon.lock`
 - `tg_cli/.tg-cli-quota-state.json`
+- `tg_cli/.tg-cli-quota-state.json.lock`
 - `tg_cli/tg-cli.audit.log`
 
 Current capabilities:
@@ -43,7 +44,7 @@ Current capabilities:
 - `tg-cli quota status [--json]`: inspect per-chat target counts, sent counts, run status, and remaining work without opening Telegram.
 - `tg-cli quota next [--json]`: claim the next quota task for an external operator, including bounded context and resolved profile guidance.
 - `tg-cli quota reply <task_id> "..." [--dry-run] [--json]`: send or dry-run one quota task reply through the safety layer and count only successful Telegram message parts.
-- `tg-cli quota stop`: mark the active quota run stopped so no new quota tasks or replies are accepted.
+- `tg-cli quota stop`: mark the active quota run stopped so no new quota tasks or replies are accepted; in-flight sends that already passed the final safety gate may still be counted if Telegram accepted them.
 
 Profile config:
 
@@ -74,8 +75,9 @@ Safety rules:
 - Keep daemon replies behind `allowed_chats`, global `pause`, forbidden-term checks, queue audit, `daemon.min_reply_interval`, `daemon.max_messages_per_hour`, `daemon.max_consecutive_replies`, stale queued-reply expiration, held rate-limit retry state, and final send audit logging.
 - Keep `daemon next`, `daemon reply`, `daemon skip`, and `daemon status` machine-readable with `--json`.
 - Quota mode does not own wall-clock scheduling. Codex automation or another scheduler starts the daily window; `tg-cli quota` owns local target counts, task selection, safety validation, Telegram sending, and stop behavior.
-- Keep quota runs local-file-backed with one active state file by default. Do not commit `.tg-cli-quota-state.json`; it may contain bounded task context and sent message ids.
+- Keep quota runs local-file-backed with one active state file by default. Do not commit `.tg-cli-quota-state.json`, its lock file, or atomic-write temp files; they may contain bounded task context and sent message ids.
 - Every quota target chat must pass `allowed_chats`. `pause` must block `quota reply`, and outbound forbidden-term checks must run before any Telegram send.
+- Keep quota replies behind `daemon.min_reply_interval`, `daemon.max_messages_per_hour`, and `daemon.max_consecutive_replies` so quota caps cannot become tight-loop sends.
 - Count quota progress only after successful Telegram sends. If one natural reply is split into multiple Telegram messages, count the actual sent parts. `--dry-run` must validate and audit without consuming tasks or incrementing counts.
 - When one target reaches its count, mark that target done and prevent further sends to that chat for the active run. When all targets are done, mark the quota run done.
 - Audit logs must not store raw message text, API hash, phone number, or session bytes.

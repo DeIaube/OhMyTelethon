@@ -310,20 +310,12 @@ def _validate_quota_reply(config, task, text):
 
 
 async def _quota_send_reply(config, task_id, task, text, dry_run=False):
-    if dry_run:
-        task_config = _config_for_quota_task(config, task)
-        chat = task.get('chat') or {}
-        safety.audit_record(
-            task_config, 'quota_reply', _quota_task_chat_id(task),
-            chat_title=chat.get('title'), text=text,
-            dry_run=True, status='dry_run')
-        return {'sent': False, 'dry_run': True, 'message_ids': []}, False
-
     telegram_ops = importlib.import_module('.telegram_ops', __package__)
     quota_reply = getattr(telegram_ops, 'quota_reply', None)
     if quota_reply is not None:
-        config.require_credentials()
-        result = quota_reply(config, task_id, text, dry_run=False)
+        if getattr(telegram_ops, 'quota_store', None) is None:
+            telegram_ops.quota_store = _quota_module()
+        result = quota_reply(config, task_id, text, dry_run=dry_run)
         result = await _maybe_await(result)
         return (result if result is not None else {}), False
 
