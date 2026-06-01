@@ -14,6 +14,9 @@ from .config import (
     normalize_round,
 )
 from . import daemon as daemon_store
+from .agent_memory import MemoryStore
+from .agent_report import summarize_agent_run
+from .agent_rooms import select_next_room
 from . import safety
 from .safety import SafetyError
 from .telegram_ops import (
@@ -103,6 +106,14 @@ def _resolve_persona(config, preset_name=None):
     return dict(getattr(config, 'persona', {}) or {})
 
 
+def _resolve_character(config, preset_name=None):
+    if hasattr(config, 'resolve_character'):
+        return config.resolve_character(preset_name)
+    if preset_name not in (None, ''):
+        raise ConfigError('Presets are not supported by this config object.')
+    return dict(getattr(config, 'character', {}) or {})
+
+
 def _resolve_daemon(config, preset_name=None):
     if hasattr(config, 'resolve_daemon'):
         return config.resolve_daemon(preset_name)
@@ -113,7 +124,8 @@ def _resolve_daemon(config, preset_name=None):
 
 def _copy_config_with_game_settings(
         config, profile, round_config=None, reply_policy=None,
-        initiative=None, persona=None, daemon_config=None, preset_name=None):
+        initiative=None, persona=None, character=None, daemon_config=None,
+        preset_name=None):
     game_config = copy.copy(config)
     game_config.profile = profile
     if round_config is not None:
@@ -124,6 +136,8 @@ def _copy_config_with_game_settings(
         game_config.initiative = initiative
     if persona is not None:
         game_config.persona = persona
+    if character is not None:
+        game_config.character = character
     if daemon_config is not None:
         game_config.daemon = daemon_config
     game_config.preset_name = preset_name
@@ -224,16 +238,20 @@ def _quota_target_remaining(target):
 
 
 def _select_quota_target(state):
-    candidates = []
+    rooms = []
     for target in (state or {}).get('targets') or []:
         remaining = _quota_target_remaining(target)
-        if target.get('status', 'active') != 'active' or remaining <= 0:
-            continue
-        candidates.append((remaining, target.get('last_sent_at') or '', target))
-    if not candidates:
+        rooms.append({
+            'chat_id': target.get('chat_id'),
+            'status': target.get('status', 'active'),
+            'remaining_count': remaining,
+            'last_sent_at': target.get('last_sent_at') or '',
+            'target': target,
+        })
+    selected = select_next_room(rooms)
+    if selected is None:
         return None
-    candidates.sort(key=lambda item: (-item[0], item[1]))
-    return candidates[0][2]
+    return selected['target']
 
 
 async def _maybe_await(value):
@@ -517,6 +535,29 @@ def build_parser():
         help='Validate without sending or incrementing quota counts.')
     quota_reply.add_argument('--json', action='store_true')
 
+    memory = sub.add_parser('memory', help='Manage local agent memory.')
+    memory_sub = memory.add_subparsers(dest='memory_command', required=True)
+
+    memory_remember = memory_sub.add_parser(
+        'remember', help='Store one memory note.')
+    memory_remember.add_argument('chat')
+    memory_remember.add_argument(
+        '--scope', choices=('room', 'user'), required=True)
+    memory_remember.add_argument('--sender-id', type=int)
+    memory_remember.add_argument('--sender-name')
+    memory_remember.add_argument('--kind', default='note')
+    memory_remember.add_argument('--text', required=True)
+    memory_remember.add_argument('--source-task-id')
+    memory_remember.add_argument('--confidence', type=float, default=1.0)
+    memory_remember.add_argument('--json', action='store_true')
+
+    memory_list = memory_sub.add_parser(
+        'list', help='List relevant memories for a chat.')
+    memory_list.add_argument('chat')
+    memory_list.add_argument('--sender-id', type=int)
+    memory_list.add_argument('--limit', type=int, default=20)
+    memory_list.add_argument('--json', action='store_true')
+
     return parser
 
 
@@ -576,9 +617,11 @@ async def _cmd_game(args, config):
         reply_policy = _resolve_reply_policy(config, args.preset)
         initiative = _resolve_initiative(config, args.preset)
         persona = _resolve_persona(config, args.preset)
+        character = _resolve_character(config, args.preset)
         game_config = _copy_config_with_game_settings(
             config, profile, reply_policy=reply_policy,
-            initiative=initiative, persona=persona, preset_name=args.preset)
+            initiative=initiative, persona=persona, character=character,
+            preset_name=args.preset)
         data = await codex_context(
             game_config, args.chat, args.limit,
             operator=args.operator, preset=args.preset)
@@ -590,6 +633,7 @@ async def _cmd_game(args, config):
             print('Preset: {}'.format(data['preset'] or 'default'))
             print('Profile: {}'.format(data['profile']))
             print('Persona: {}'.format(data['persona']))
+            print('Character: {}'.format(data.get('character') or {}))
             print('Reply policy: {}'.format(data['reply_policy']))
             print('Initiative: {}'.format(data['initiative']))
             print('Recent messages:')
@@ -603,9 +647,11 @@ async def _cmd_game(args, config):
         reply_policy = _resolve_reply_policy(config, args.preset)
         initiative = _resolve_initiative(config, args.preset)
         persona = _resolve_persona(config, args.preset)
+        character = _resolve_character(config, args.preset)
         game_config = _copy_config_with_game_settings(
             config, profile, reply_policy=reply_policy,
-            initiative=initiative, persona=persona, preset_name=args.preset)
+            initiative=initiative, persona=persona, character=character,
+            preset_name=args.preset)
         data = await group_context(
             game_config, args.chat, args.limit,
             operator=args.operator, preset=args.preset)
@@ -634,11 +680,13 @@ async def _cmd_game(args, config):
         reply_policy = _resolve_reply_policy(config, args.preset)
         initiative = _resolve_initiative(config, args.preset)
         persona = _resolve_persona(config, args.preset)
+        character = _resolve_character(config, args.preset)
         round_config = _round_with_cli_overrides(
             _resolve_round(config, args.preset), args)
         game_config = _copy_config_with_game_settings(
             config, profile, round_config, reply_policy=reply_policy,
-            initiative=initiative, persona=persona, preset_name=args.preset)
+            initiative=initiative, persona=persona, character=character,
+            preset_name=args.preset)
         await interactive_round(
             game_config, args.chat,
             duration=round_config['duration'],
@@ -679,6 +727,8 @@ def _config_for_task(config, task):
         task.get('reply_policy') or getattr(config, 'reply_policy', {}))
     task_config.initiative = (
         task.get('initiative') or getattr(config, 'initiative', {}))
+    task_config.character = (
+        task.get('character') or getattr(config, 'character', {}))
     return task_config
 
 
@@ -696,6 +746,7 @@ def _daemon_status_payload(config):
         'lock_path': str(lock_path),
         'status_path': str(_daemon_path(config, 'status')),
         'locked': lock_path.is_file(),
+        'agent_report': summarize_agent_run(status.get('agent_events') or []),
     }
 
 
@@ -708,11 +759,12 @@ async def _cmd_daemon(args, config):
         reply_policy = _resolve_reply_policy(config, args.preset)
         initiative = _resolve_initiative(config, args.preset)
         persona = _resolve_persona(config, args.preset)
+        character = _resolve_character(config, args.preset)
         round_config = _resolve_round(config, args.preset)
         resolved_daemon = _resolve_daemon(config, args.preset)
         daemon_config = _copy_config_with_game_settings(
             config, profile, round_config, reply_policy=reply_policy,
-            initiative=initiative, persona=persona,
+            initiative=initiative, persona=persona, character=character,
             daemon_config=resolved_daemon, preset_name=args.preset)
         await daemon_run(
             daemon_config, args.chat, preset=args.preset,
@@ -847,6 +899,9 @@ async def _cmd_quota(args, config):
 
     if args.quota_command == 'status':
         payload = _quota_status(config)
+        payload.setdefault(
+            'agent_report',
+            summarize_agent_run(payload.get('tasks') or []))
         if args.json:
             print(dumps_json(payload))
         else:
@@ -953,6 +1008,58 @@ async def _cmd_quota(args, config):
     raise AssertionError(args.quota_command)
 
 
+async def _cmd_memory(args, config):
+    memory_config = getattr(config, 'memory', {}) or {}
+    memory_path = memory_config.get('path')
+    if memory_path in (None, ''):
+        raise ConfigError('memory.path is not configured.')
+    store = MemoryStore(memory_path)
+    chat_id = normalize_chat_id(args.chat)
+
+    if args.memory_command == 'remember':
+        try:
+            memory_id = store.remember(
+                chat_id=chat_id,
+                scope=args.scope,
+                sender_id=args.sender_id,
+                sender_name=args.sender_name,
+                kind=args.kind,
+                content=args.text,
+                confidence=args.confidence,
+                source_task_id=args.source_task_id)
+        except ValueError as exc:
+            raise TelegramCliError(str(exc)) from exc
+        payload = {
+            'remembered': True,
+            'id': memory_id,
+            'chat_id': chat_id,
+            'scope': args.scope,
+        }
+        if args.json:
+            print(dumps_json(payload))
+        else:
+            print('Stored memory id={} chat={} scope={}.'.format(
+                memory_id, chat_id, args.scope))
+        return
+
+    if args.memory_command == 'list':
+        memories = store.relevant_memories(
+            chat_id=chat_id, sender_id=args.sender_id, limit=args.limit)
+        payload = {
+            'chat_id': chat_id,
+            'sender_id': args.sender_id,
+            'memories': memories,
+        }
+        if args.json:
+            print(dumps_json(payload))
+        else:
+            for item in memories:
+                print('[{id}] {scope} {kind}: {content}'.format(**item))
+        return
+
+    raise AssertionError(args.memory_command)
+
+
 def _status_payload(config):
     state = safety.load_state(config)
     return {
@@ -1012,6 +1119,8 @@ def main(argv=None):
             _run(_cmd_daemon(args, config))
         elif args.command == 'quota':
             _run(_cmd_quota(args, config))
+        elif args.command == 'memory':
+            _run(_cmd_memory(args, config))
         else:
             parser.error('unknown command {}'.format(args.command))
         return 0

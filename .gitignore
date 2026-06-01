@@ -19,6 +19,8 @@
 .tg-cli-quota-state.json
 .tg-cli-quota-state.json.lock
 *.tg-cli-quota-state.json.*.tmp
+.tg-cli-memory.sqlite3
+.tg-cli-memory.sqlite3-*
 tg-cli.audit.log
 
 # Builds and testing

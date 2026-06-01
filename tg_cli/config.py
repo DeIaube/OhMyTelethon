@@ -7,6 +7,11 @@ class ConfigError(RuntimeError):
     pass
 
 
+from .agent_character import (
+    merge_character, normalize_character, normalize_character_overlay,
+)
+
+
 DEFAULT_PROFILE = {
     'style': '自然、简短、像普通群聊，不要长篇解释。',
     'language': '中文',
@@ -57,6 +62,13 @@ DEFAULT_DAEMON = {
 
 DEFAULT_QUOTA = {
     'state_path': None,
+}
+
+
+DEFAULT_MEMORY = {
+    'path': None,
+    'enabled': False,
+    'max_task_memories': 8,
 }
 
 
@@ -274,6 +286,30 @@ def normalize_quota(quota_config=None):
         normalized['state_path'] = str(value)
     elif not isinstance(value, str):
         raise ConfigError('quota.state_path must be a string.')
+    return normalized
+
+
+def normalize_memory(memory_config=None):
+    if memory_config in (None, ''):
+        memory_config = {}
+    if not isinstance(memory_config, dict):
+        raise ConfigError('memory must contain a JSON object.')
+
+    normalized = dict(DEFAULT_MEMORY)
+    normalized.update(memory_config)
+    normalized['enabled'] = bool(normalized.get('enabled'))
+    value = normalized.get('path')
+    if value in (None, ''):
+        normalized['path'] = None
+    elif isinstance(value, Path):
+        normalized['path'] = str(value)
+    elif not isinstance(value, str):
+        raise ConfigError('memory.path must be a string.')
+    max_task_memories = int(normalized.get('max_task_memories'))
+    if max_task_memories < 0:
+        raise ConfigError(
+            'memory.max_task_memories must be greater than or equal to 0.')
+    normalized['max_task_memories'] = max_task_memories
     return normalized
 
 
@@ -584,6 +620,7 @@ def normalize_presets(presets=None):
         initiative = preset.get('initiative', {})
         persona = preset.get('persona', {})
         daemon_config = preset.get('daemon', {})
+        character = preset.get('character', {})
         if profile in (None, ''):
             profile = {}
         if round_config in (None, ''):
@@ -596,6 +633,8 @@ def normalize_presets(presets=None):
             persona = {}
         if daemon_config in (None, ''):
             daemon_config = {}
+        if character in (None, ''):
+            character = {}
         if not isinstance(profile, dict):
             raise ConfigError(
                 'presets.{}.profile must contain a JSON object.'.format(
@@ -620,6 +659,10 @@ def normalize_presets(presets=None):
             raise ConfigError(
                 'presets.{}.daemon must contain a JSON object.'.format(
                     preset_name))
+        if not isinstance(character, dict):
+            raise ConfigError(
+                'presets.{}.character must contain a JSON object.'.format(
+                    preset_name))
 
         normalized[preset_name] = {
             'profile': _normalize_profile_overlay(profile, preset_name),
@@ -637,6 +680,7 @@ def normalize_presets(presets=None):
                 persona,
                 path='presets.{}.persona'.format(preset_name),
                 include_defaults=False),
+            'character': normalize_character_overlay(character, preset_name),
         }
     return normalized
 
@@ -647,7 +691,8 @@ class AppConfig:
             allowed_chats=None, state_path=None, audit_log_path=None,
             profile=None, round_config=None, presets=None, config_path=None,
             reply_policy=None, initiative=None, persona=None,
-            daemon_config=None, quota_config=None):
+            daemon_config=None, quota_config=None, character=None,
+            memory_config=None):
         self.api_id = api_id
         self.api_hash = api_hash
         self.session_path = Path(session_path).expanduser().resolve()
@@ -665,9 +710,14 @@ class AppConfig:
         if self.quota.get('state_path') is not None:
             self.quota['state_path'] = (
                 Path(self.quota['state_path']).expanduser().resolve())
+        self.memory = normalize_memory(memory_config)
+        if self.memory.get('path') is not None:
+            self.memory['path'] = (
+                Path(self.memory['path']).expanduser().resolve())
         self.reply_policy = normalize_reply_policy(reply_policy)
         self.initiative = normalize_initiative(initiative)
         self.persona = normalize_persona(persona)
+        self.character = normalize_character(character)
         self.presets = normalize_presets(presets)
         self.config_path = Path(config_path).expanduser().resolve() if config_path else None
 
@@ -724,6 +774,13 @@ class AppConfig:
         if preset:
             persona.update(preset.get('persona') or {})
         return normalize_persona(persona)
+
+    def resolve_character(self, preset_name=None):
+        character = dict(self.character)
+        preset = self._preset(preset_name)
+        if preset:
+            return merge_character(character, preset.get('character') or {})
+        return normalize_character(character)
 
     def resolve_daemon(self, preset_name=None):
         daemon_config = dict(self.daemon)
@@ -837,6 +894,14 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
         quota_state_path = Path(quota_config['state_path']).expanduser()
         if not quota_state_path.is_absolute():
             quota_config['state_path'] = str(base / quota_state_path)
+    memory_config = dict(data.get('memory') or {})
+    memory_config.setdefault(
+        'path',
+        str(base / 'tg_cli' / '.tg-cli-memory.sqlite3'))
+    if memory_config.get('path') not in (None, ''):
+        memory_path = Path(memory_config['path']).expanduser()
+        if not memory_path.is_absolute():
+            memory_config['path'] = str(base / memory_path)
 
     cfg = AppConfig(
         api_id=api_id,
@@ -852,8 +917,10 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
         reply_policy=data.get('reply_policy'),
         initiative=data.get('initiative'),
         persona=data.get('persona'),
+        character=data.get('character'),
         daemon_config=daemon_config,
         quota_config=quota_config,
+        memory_config=memory_config,
     )
     if require_credentials:
         cfg.require_credentials()

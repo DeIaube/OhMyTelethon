@@ -8,6 +8,8 @@ The current game profile has four layers:
 - `persona`: 像谁. A generic or fictional voice for the account, not a real-person binding.
 - `reply_policy`: 怎么接话. When to reply, when to skip, and how to avoid over-answering.
 - `initiative`: 怎么主动开口. Whether the account may start a topic, how often, and under which bounded triggers.
+- `character`: elizaOS-inspired voice, action, example, topic, and evaluator hints.
+- `memory`: optional local SQLite room/user notes for Codex task context.
 
 Default initiative should stay off or low-frequency. More active behavior belongs in explicit presets such as `chat_normal` and `chat_social`.
 
@@ -32,6 +34,11 @@ Default initiative should stay off or low-frequency. More active behavior belong
   "quota": {
     "state_path": ".tg-cli-quota-state.json"
   },
+  "memory": {
+    "enabled": false,
+    "path": ".tg-cli-memory.sqlite3",
+    "max_task_memories": 8
+  },
   "profile": {
     "style": "自然、简短、像普通群聊，不要长篇解释。",
     "language": "中文",
@@ -47,6 +54,20 @@ Default initiative should stay off or low-frequency. More active behavior belong
     "catchphrases": ["看情况", "先试试"],
     "avoid": ["长篇解释", "客服感"],
     "style_notes": ["像在群里随手回一句"]
+  },
+  "character": {
+    "name": "小林",
+    "bio": ["普通群友", "外向但不刷屏"],
+    "lore": ["不声称真实身份或线下经历", "不编造事实"],
+    "style": {
+      "all": ["中文短句", "自然接话"],
+      "chat": ["别像客服", "少解释"]
+    },
+    "topics": ["游戏", "日常闲聊", "周末安排"],
+    "adjectives": ["社交", "轻松", "会接梗"],
+    "message_examples": [],
+    "actions": ["reply", "ask_open_question", "light_joke", "skip"],
+    "evaluators": ["not_everything", "cooldown", "skip_short_ack", "no_identity_claims"]
   },
   "reply_policy": {
     "group_type": "chat",
@@ -96,6 +117,16 @@ For a credential-free starter file, see `tg_cli/docs/local-profile-template.json
 - `persona.catchphrases`: Optional common phrasing hints.
 - `persona.avoid`: Voice patterns to avoid.
 - `persona.style_notes`: Extra operator-facing style notes.
+- `character.name`: Short character name used in operator prompts. This is a voice label, not permission to impersonate a real person.
+- `character.bio`: Short background/voice notes for the character.
+- `character.lore`: Behavioral constraints and safety boundaries such as no fabricated offline experience.
+- `character.style.all`: General style rules.
+- `character.style.chat`: Chat-specific style rules.
+- `character.topics`: Safe topic seeds.
+- `character.adjectives`: Voice adjectives used as prompt hints.
+- `character.message_examples`: Optional elizaOS-like examples. Keep these credential-free and non-private.
+- `character.actions`: Allowed action hints such as `reply`, `ask_open_question`, `light_joke`, and `skip`.
+- `character.evaluators`: Deterministic/local evaluator hints such as `not_everything`, `cooldown`, `skip_short_ack`, and `no_identity_claims`.
 - `reply_policy.group_type`: Context label such as `chat`, `friends`, `interest`, or `public_large_group`.
 - `reply_policy.reply_threshold`: Guidance threshold from `0` to `1`; lower is more willing to reply.
 - `reply_policy.prefer_reply_when`: Situations where replying is natural.
@@ -131,6 +162,9 @@ For a credential-free starter file, see `tg_cli/docs/local-profile-template.json
 - `daemon.max_messages_per_hour`: Per-daemon hourly outbound message cap.
 - `daemon.max_consecutive_replies`: Maximum consecutive account replies before another inbound message is required.
 - `quota.state_path`: Local JSON state file for the active quota run. The default is `.tg-cli-quota-state.json` under `tg_cli/`; keep it, its lock file, and atomic-write temp files ignored by git.
+- `memory.enabled`: Whether `game suggest`, `daemon`, and `quota` include local memory snippets. Default: `false`.
+- `memory.path`: Local SQLite database for room/user memories. Default: `.tg-cli-memory.sqlite3` under `tg_cli/`; keep it and SQLite sidecar files ignored by git.
+- `memory.max_task_memories`: Maximum memory snippets included in one operator task.
 
 Unknown extra keys are preserved in `game suggest --json`, so operator-specific hints can be added without breaking older versions.
 
@@ -144,8 +178,9 @@ Top-level `presets` can overlay any of these objects:
 - `initiative`
 - `round`
 - `daemon` non-path rate/queue controls
+- `character`
 
-Only one preset is selected per command. If you want to combine a persona with a social initiative setting, copy both into one named preset. `quota start --preset NAME` uses the same resolved `profile`, `persona`, `reply_policy`, and `initiative` guidance when creating quota tasks. Preset-level `daemon` may tune non-path controls such as `min_reply_interval`, `max_messages_per_hour`, and `max_consecutive_replies`; keep `queue_path`, `lock_path`, and `status_path` at the top level.
+Only one preset is selected per command. If you want to combine a persona with a social initiative setting, copy both into one named preset. `quota start --preset NAME` uses the same resolved `profile`, `persona`, `reply_policy`, `initiative`, and `character` guidance when creating quota tasks. Preset-level `daemon` may tune non-path controls such as `min_reply_interval`, `max_messages_per_hour`, and `max_consecutive_replies`; keep `queue_path`, `lock_path`, and `status_path` at the top level.
 
 Common starter presets:
 
@@ -257,6 +292,30 @@ Quota counting rules:
 - Mark the run `stopped` when `quota stop` is requested. In-flight sends that already passed the final safety gate may still be counted if Telegram accepted them.
 
 Quota safety is the same outbound safety stance as the rest of the CLI: target chats must be in `allowed_chats`, `pause` blocks `quota reply`, forbidden terms are checked before `client.send_message`, daemon pacing limits apply, and audit logging records hashes and lengths instead of raw message text.
+
+## Memory Config
+
+Memory is local and opt-in. It is meant for short, stable notes that help Codex avoid asking the same thing repeatedly or missing recurring group context. It should not be used as a raw chat archive.
+
+```json
+{
+  "memory": {
+    "enabled": true,
+    "path": ".tg-cli-memory.sqlite3",
+    "max_task_memories": 8
+  }
+}
+```
+
+Operator-authored notes:
+
+```sh
+tg-cli memory remember 5217114569 --scope room --kind summary --text "这个群最近在聊晚上开黑。"
+tg-cli memory remember 5217114569 --scope user --sender-id 123456 --sender-name "阿强" --kind preference --text "阿强常接游戏话题。"
+tg-cli memory list 5217114569 --json
+```
+
+Store summaries, preferences, recurring topics, and explicitly provided stable facts. Do not store private raw messages, credentials, phone numbers, or sensitive personal details.
 
 ## Prompt Behavior
 

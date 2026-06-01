@@ -4,9 +4,9 @@ import pytest
 
 from tg_cli.config import (
     DEFAULT_DAEMON, DEFAULT_INITIATIVE, DEFAULT_PERSONA, DEFAULT_PROFILE,
-    DEFAULT_QUOTA, DEFAULT_REPLY_POLICY, DEFAULT_ROUND, ConfigError,
-    load_config, normalize_chat_id, normalize_daemon, normalize_quota,
-    normalize_round, parse_chat_ids,
+    DEFAULT_QUOTA, DEFAULT_REPLY_POLICY, DEFAULT_ROUND, DEFAULT_MEMORY,
+    ConfigError, load_config, normalize_chat_id, normalize_daemon,
+    normalize_memory, normalize_quota, normalize_round, parse_chat_ids,
 )
 
 
@@ -73,12 +73,19 @@ def test_load_config_supplies_profile_defaults_when_omitted(tmp_path):
     assert config.quota['state_path'] == (
         tmp_path / 'tg_cli' / '.tg-cli-quota-state.json').resolve()
     assert DEFAULT_QUOTA['state_path'] is None
+    assert config.memory['enabled'] is False
+    assert config.memory['path'] == (
+        tmp_path / 'tg_cli' / '.tg-cli-memory.sqlite3').resolve()
+    assert config.memory['max_task_memories'] == DEFAULT_MEMORY['max_task_memories']
+    assert DEFAULT_MEMORY['path'] is None
     assert config.reply_policy == DEFAULT_REPLY_POLICY
     assert config.initiative == DEFAULT_INITIATIVE
     assert config.persona == DEFAULT_PERSONA
+    assert config.character['actions'] == ['reply', 'skip']
     assert config.resolve_reply_policy(None) == DEFAULT_REPLY_POLICY
     assert config.resolve_initiative(None) == DEFAULT_INITIATIVE
     assert config.resolve_persona(None) == DEFAULT_PERSONA
+    assert config.resolve_character(None)['actions'] == ['reply', 'skip']
 
 
 def test_load_config_merges_social_policy_defaults_with_file_values(tmp_path):
@@ -301,6 +308,14 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
             'identity': 'global identity',
             'traits': ['global trait'],
         },
+        'character': {
+            'name': 'global character',
+            'style': {
+                'all': ['global all'],
+                'chat': ['global chat'],
+            },
+            'actions': ['reply', 'skip'],
+        },
         'daemon': {
             'min_reply_interval': 6,
             'max_messages_per_hour': 20,
@@ -331,6 +346,13 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
                     'traits': ['witty'],
                     'avoid': 'lecturing',
                 },
+                'character': {
+                    'name': 'social character',
+                    'style': {
+                        'chat': ['preset chat'],
+                    },
+                    'actions': ['reply', 'light_joke'],
+                },
             },
         },
     }), encoding='utf-8')
@@ -339,6 +361,7 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
     reply_policy = config.resolve_reply_policy('social')
     initiative = config.resolve_initiative('social')
     persona = config.resolve_persona('social')
+    character = config.resolve_character('social')
     daemon = config.resolve_daemon('social')
 
     assert config.presets['social']['daemon'] == {
@@ -365,6 +388,13 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
         'traits': ['witty'],
         'avoid': ['lecturing'],
     }
+    assert config.presets['social']['character'] == {
+        'name': 'social character',
+        'style': {
+            'chat': ['preset chat'],
+        },
+        'actions': ['reply', 'light_joke'],
+    }
     assert reply_policy['reply_threshold'] == 0.9
     assert reply_policy['prefer_reply_when'] == ['global cue']
     assert reply_policy['skip_when'] == ['heated argument']
@@ -381,6 +411,11 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
     assert persona['identity'] == 'global identity'
     assert persona['traits'] == ['witty']
     assert persona['avoid'] == ['lecturing']
+    assert character['name'] == 'social character'
+    assert character['style']['all'] == ['global all']
+    assert character['style']['chat'] == ['preset chat']
+    assert character['actions'] == ['reply', 'light_joke']
+    assert character['evaluators'] == ['not_everything', 'cooldown', 'no_identity_claims']
     assert daemon['min_reply_interval'] == 2.0
     assert daemon['max_messages_per_hour'] == 240
     assert daemon['max_consecutive_replies'] == 4
@@ -484,6 +519,15 @@ def test_load_config_rejects_invalid_social_policy_shapes(tmp_path):
     with pytest.raises(ConfigError, match='presets.social.daemon.queue_path'):
         load_config(config_path, env={}, cwd=tmp_path)
 
+    config_path.write_text(json.dumps({
+        'presets': {
+            'social': {'character': 'not-object'},
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='presets.social.character'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
 
 def test_load_config_rejects_invalid_social_policy_values_with_paths(tmp_path):
     config_path = tmp_path / '.tg-cli.json'
@@ -558,3 +602,12 @@ def test_normalize_quota_rejects_invalid_values():
         normalize_quota(['not-object'])
     with pytest.raises(ConfigError, match='quota.state_path'):
         normalize_quota({'state_path': 123})
+
+
+def test_normalize_memory_rejects_invalid_values():
+    with pytest.raises(ConfigError, match='memory must contain a JSON object'):
+        normalize_memory(['not-object'])
+    with pytest.raises(ConfigError, match='memory.path'):
+        normalize_memory({'path': 123})
+    with pytest.raises(ConfigError, match='memory.max_task_memories'):
+        normalize_memory({'max_task_memories': -1})

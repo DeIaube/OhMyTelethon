@@ -15,6 +15,9 @@ from telethon.tl.types import Channel, Chat, User
 
 from .config import normalize_chat_id
 from . import daemon as daemon_store
+from .agent_policy import evaluate_message_batch
+from .agent_prompt import build_initiative_prompt, build_operator_prompt
+from .agent_report import summarize_agent_run
 from . import safety
 
 
@@ -98,6 +101,69 @@ def _emit(output_func, text=''):
         output_func(text, flush=True)
     except TypeError:
         output_func(text)
+
+
+def _character(config):
+    return dict(getattr(config, 'character', {}) or {})
+
+
+def _memory_enabled(config):
+    memory_config = getattr(config, 'memory', {}) or {}
+    return bool(memory_config.get('enabled') and memory_config.get('path'))
+
+
+def _memory_for_task(config, chat_id, sender_id=None):
+    if not _memory_enabled(config):
+        return []
+    from .agent_memory import MemoryStore
+    memory_config = getattr(config, 'memory', {}) or {}
+    store = MemoryStore(memory_config['path'])
+    store.ensure_schema()
+    return store.relevant_memories(
+        chat_id=chat_id,
+        sender_id=sender_id,
+        limit=memory_config.get('max_task_memories', 8))
+
+
+def _record_memory_event(config, chat_id, message_id, sender_id, sender_name,
+                         direction, text):
+    if not _memory_enabled(config):
+        return None
+    from .agent_memory import MemoryStore
+    memory_config = getattr(config, 'memory', {}) or {}
+    store = MemoryStore(memory_config['path'])
+    store.ensure_schema()
+    return store.record_event(
+        chat_id=chat_id,
+        message_id=message_id,
+        sender_id=sender_id,
+        sender_name=sender_name,
+        direction=direction,
+        text=text)
+
+
+def _record_agent_event(status_path, action, status, reason=None):
+    if status_path in (None, ''):
+        return None
+    try:
+        payload = daemon_store.read_status(status_path)
+        events_ = list(payload.get('agent_events') or [])
+        events_.append({
+            'action': str(action or 'unknown'),
+            'status': str(status or 'unknown'),
+            'reason': reason,
+            'at': _dt.datetime.now(_dt.timezone.utc).replace(
+                microsecond=0).isoformat(),
+        })
+        payload['agent_events'] = events_[-200:]
+        payload['agent_report'] = summarize_agent_run(payload['agent_events'])
+        return daemon_store.write_status(status_path, payload)
+    except Exception:
+        return None
+
+
+def _action_from_decision(decision):
+    return (decision or {}).get('action') or 'reply'
 
 
 def _remember_inbound_message(seen_ids, message_id):
@@ -277,6 +343,7 @@ def summarize_group_context(config, row, messages, operator='agent', preset=None
     persona = dict(getattr(config, 'persona', {}) or {})
     reply_policy = dict(getattr(config, 'reply_policy', {}) or {})
     initiative = dict(getattr(config, 'initiative', {}) or {})
+    character = _character(config)
     operator = (operator or 'agent').strip() or 'agent'
     tail_limit = max(0, int(tail_limit))
 
@@ -301,6 +368,7 @@ def summarize_group_context(config, row, messages, operator='agent', preset=None
         'persona': persona,
         'reply_policy': reply_policy,
         'initiative': initiative,
+        'character': character,
         'message_count': len(messages),
         'active_speakers': active_speakers,
         'recent_topics': recent_topics,
@@ -366,6 +434,24 @@ def _format_persona_guidance(persona):
         if persona.get(key):
             parts.append('{}={}'.format(key, _format_named_list(persona.get(key))))
     return '; '.join(parts) if parts else 'persona=default'
+
+
+def _format_character_guidance(character):
+    character = character or {}
+    if not character:
+        return 'character=default'
+    parts = []
+    if character.get('name'):
+        parts.append('name={}'.format(character.get('name')))
+    for key in ('bio', 'lore', 'topics', 'adjectives', 'actions', 'evaluators'):
+        if character.get(key):
+            parts.append('{}={}'.format(
+                key, _format_named_list(character.get(key))))
+    style = character.get('style') or {}
+    if style:
+        parts.append('style={}'.format(
+            json.dumps(style, ensure_ascii=False, sort_keys=True)))
+    return '; '.join(parts) if parts else 'character=default'
 
 
 def _format_reply_policy_guidance(reply_policy):
@@ -467,21 +553,31 @@ def _initiative_allows_active_bypass(initiative, initiative_starts):
         initiative, max_starts)
 
 
-def _round_instruction(profile, persona=None, reply_policy=None):
+def _round_instruction(profile, persona=None, reply_policy=None,
+                       initiative=None, character=None, memory=None,
+                       recent_messages=None, action=None):
     return (
         'Agent instruction: decide whether a normal person would reply. '
         'If not, use empty input to skip. Reply with one natural chat reply. '
         'Keep it short. If splitting is enabled, split only naturally separate thoughts; '
-        'never pad for message count. '
-        '{}. {}. {}. Do not explain your decision. Use /quit to stop.'
-    ).format(
-        _format_profile_guidance(profile),
-        _format_persona_guidance(persona),
-        _format_reply_policy_guidance(reply_policy))
+        'never pad for message count. Use /quit to stop.\n'
+        '{}'
+    ).format(build_operator_prompt(
+        operator='codex',
+        task_kind='message',
+        profile=profile,
+        persona=persona or {},
+        reply_policy=reply_policy or {},
+        initiative=initiative or {},
+        character=character or {},
+        memory=memory or [],
+        recent_messages=recent_messages or [],
+        action=action))
 
 
 def _initiative_instruction(profile, persona, reply_policy, initiative,
-                            preset=None, idle_seconds=0.0, recent_messages=None):
+                            preset=None, idle_seconds=0.0, recent_messages=None,
+                            character=None, memory=None):
     recent_messages = recent_messages or []
     recent_lines = []
     for item in recent_messages[-6:]:
@@ -500,6 +596,15 @@ def _initiative_instruction(profile, persona, reply_policy, initiative,
             'Prefer continuing a concrete harmless recent topic. '
             'If none exists, skip instead of forcing a reply.'
         )
+    operator_prompt = build_initiative_prompt(
+        profile=profile,
+        persona=persona,
+        reply_policy=reply_policy,
+        initiative=initiative,
+        character=character or {},
+        memory=memory or [],
+        idle_seconds=idle_seconds,
+        recent_messages=recent_messages)
     return (
         'Agent initiative opportunity:\n'
         'The group has been idle for {idle:.1f}s. preset={preset}.\n'
@@ -508,7 +613,7 @@ def _initiative_instruction(profile, persona, reply_policy, initiative,
         '{topic_shift_rule} '
         'Split replies only when each part adds real content; never pad, repeat yourself, or comment on chat speed just to be active. '
         'Do not mention AI/Codex/Claude/operator identity. Do not advertise, moderate, summarize the group, ask private questions, or join risky topics. '
-        'Output one natural reply to send, or empty input to skip.'
+        'Output one natural reply to send, or empty input to skip.\n{operator_prompt}'
     ).format(
         idle=float(idle_seconds),
         preset=preset or 'default',
@@ -517,7 +622,9 @@ def _initiative_instruction(profile, persona, reply_policy, initiative,
         reply_policy=_format_reply_policy_guidance(reply_policy),
         initiative=_format_initiative_guidance(initiative),
         recent=recent_context,
-        topic_shift_rule=topic_shift_rule)
+        topic_shift_rule=topic_shift_rule,
+        operator_prompt=operator_prompt,
+        )
 
 
 class RoundReport:
@@ -1030,6 +1137,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
     persona = getattr(config, 'persona', {}) or {}
     reply_policy = getattr(config, 'reply_policy', {}) or {}
     initiative = getattr(config, 'initiative', {}) or {}
+    character = _character(config)
     preset_name = getattr(config, 'preset_name', None)
 
     if split_long_replies is not None:
@@ -1067,6 +1175,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 random_delay_min, random_delay_max, merge_window))
         emit('Profile: {}'.format(_format_profile_guidance(profile)))
         emit('Persona: {}'.format(_format_persona_guidance(persona)))
+        emit('Character: {}'.format(_format_character_guidance(character)))
         emit('Reply policy: {}'.format(_format_reply_policy_guidance(reply_policy)))
         emit('Initiative: {}'.format(_format_initiative_guidance(initiative)))
         emit('Type a reply to send, empty line to skip, /quit to stop.')
@@ -1228,6 +1337,9 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 last_sent_at = loop.time()
                 last_activity_at = last_sent_at
                 sent_ids.append(sent.id)
+                _record_memory_event(
+                    config, row['id'], sent.id, me.id,
+                    utils.get_display_name(me), 'out', part)
                 report.record_sent_message(sent.id)
                 safety.audit_record(
                     config, 'game_round_send', row['id'], chat_title=row['title'],
@@ -1265,6 +1377,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
             report.record_initiative_prompt()
             recent_context = await _recent_context_lines(
                 client, entity, min(limit, 8))
+            memory = _memory_for_task(config, row['id'])
             current_now = loop.time()
             if safety.should_stop_for_end_buffer(current_now, end_at, end_buffer):
                 emit('Skipped initiative: remaining time is below end_buffer={}s.'.format(
@@ -1276,7 +1389,8 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
             emit(_initiative_instruction(
                 profile, persona, reply_policy, initiative,
                 preset=preset_name, idle_seconds=current_now - last_activity_at,
-                recent_messages=recent_context))
+                recent_messages=recent_context, character=character,
+                memory=memory))
             safety.require_can_write(config, row['id'])
             reply = input_func(
                 'Agent initiative (empty skip, /quit stop): ').strip()
@@ -1334,12 +1448,17 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
             report.record_batch(len(events_batch))
             incoming_lines = []
             combined_text = []
+            latest_sender_id = None
             for item_event in events_batch:
                 sender = await item_event.get_sender()
                 sender_name = (
                     utils.get_display_name(sender)
                     if sender else str(item_event.sender_id))
                 text = item_event.message.message or ''
+                latest_sender_id = item_event.sender_id
+                _record_memory_event(
+                    config, row['id'], item_event.message.id,
+                    item_event.sender_id, sender_name, 'in', text)
                 incoming_lines.append((item_event.message.id, sender_name, text))
                 combined_text.append(text)
 
@@ -1352,23 +1471,37 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 for msg_id, sender_name, text in incoming_lines:
                     emit('- [{}] {}: {}'.format(msg_id, sender_name, text))
 
-            should_prompt, reason = _should_prompt_for_text(
+            decision = evaluate_message_batch(
                 '\n'.join(combined_text),
-                reply_probability=reply_probability,
-                mention_reply_probability=mention_reply_probability,
+                round_config={
+                    'reply_probability': reply_probability,
+                    'mention_reply_probability': mention_reply_probability,
+                    'skip_short_ack': skip_short_ack,
+                },
+                reply_policy=reply_policy,
+                initiative=initiative,
+                character=character,
                 mentions_me=_mentions_me('\n'.join(combined_text), me_names),
-                skip_short_ack=skip_short_ack)
+                me_names=me_names)
+            should_prompt = decision['should_prompt']
+            reason = decision['reason']
             if not should_prompt:
                 emit('Skipped: {}.'.format(reason))
                 report.record_skip(reason)
                 continue
 
+            recent_for_prompt = await _recent_context_lines(client, entity, limit)
+            memory = _memory_for_task(config, row['id'], latest_sender_id)
             if not quiet_context:
                 emit('Recent context:')
-                for item in await _recent_context_lines(client, entity, limit):
+                for item in recent_for_prompt:
                     prefix = 'me' if item['out'] else item['sender']
                     emit('- [{}] {}: {}'.format(item['id'], prefix, item['text']))
-            emit(_round_instruction(profile, persona, reply_policy))
+            emit(_round_instruction(
+                profile, persona, reply_policy, initiative=initiative,
+                character=character, memory=memory,
+                recent_messages=recent_for_prompt,
+                action=_action_from_decision(decision)))
             report.record_prompt()
 
             safety.require_can_write(config, row['id'])
@@ -1393,8 +1526,13 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
         await client.disconnect()
 
 
-def _daemon_task_prompt(profile, persona, reply_policy, round_config=None):
-    prompt = _round_instruction(profile, persona, reply_policy)
+def _daemon_task_prompt(profile, persona, reply_policy, round_config=None,
+                        initiative=None, character=None, memory=None,
+                        recent_messages=None, action=None):
+    prompt = _round_instruction(
+        profile, persona, reply_policy, initiative=initiative,
+        character=character, memory=memory, recent_messages=recent_messages,
+        action=action)
     round_config = round_config or {}
     if round_config.get('split_long_replies'):
         prompt += (
@@ -1424,6 +1562,9 @@ def _task_config(base_config, task):
     task_config.initiative = (
         task.get('initiative') or context.get('initiative') or
         getattr(base_config, 'initiative', {}))
+    task_config.character = (
+        task.get('character') or context.get('character') or
+        getattr(base_config, 'character', {}))
     if task.get('round') is not None or context.get('round') is not None:
         task_config.round = task.get('round') or context.get('round') or {}
     return task_config
@@ -1676,6 +1817,8 @@ def _quota_config_with_preset(config, preset_name):
     resolved.reply_policy = config.resolve_reply_policy(preset_name)
     resolved.initiative = config.resolve_initiative(preset_name)
     resolved.persona = config.resolve_persona(preset_name)
+    if hasattr(config, 'resolve_character'):
+        resolved.character = config.resolve_character(preset_name)
     resolved.preset_name = preset_name
     return resolved
 
@@ -1740,6 +1883,8 @@ async def quota_next_context(config, limit=12, operator='agent'):
     context = summarize_group_context(
         effective_config, row, messages, operator=operator, preset=preset,
         tail_limit=limit)
+    memory = _memory_for_task(effective_config, row['id'])
+    character = copy.deepcopy(context.get('character') or _character(effective_config))
     task_context = {
         'chat': copy.deepcopy(row),
         'operator': context['operator'],
@@ -1748,11 +1893,20 @@ async def quota_next_context(config, limit=12, operator='agent'):
         'persona': copy.deepcopy(context['persona']),
         'reply_policy': copy.deepcopy(context['reply_policy']),
         'initiative': copy.deepcopy(context['initiative']),
+        'character': character,
+        'actions': copy.deepcopy(character.get('actions') or []),
+        'evaluators': copy.deepcopy(character.get('evaluators') or []),
+        'memory': copy.deepcopy(memory),
+        'action': 'decide',
         'round': copy.deepcopy(getattr(effective_config, 'round', {}) or {}),
         'prompt': _daemon_task_prompt(
             context['profile'], context['persona'],
             context['reply_policy'],
-            getattr(effective_config, 'round', {}) or {}),
+            getattr(effective_config, 'round', {}) or {},
+            initiative=context['initiative'],
+            character=character,
+            memory=memory,
+            recent_messages=context['messages_tail']),
         'messages': copy.deepcopy(context['messages_tail']),
         'context_summary': _task_context_summary(context),
         'quota': {
@@ -1895,6 +2049,8 @@ async def quota_reply(config, task_id, text, dry_run=False):
             for part in reply_parts:
                 sent = await client.send_message(entity, part)
                 sent_ids.append(sent.id)
+                _record_memory_event(
+                    task_config, row['id'], sent.id, None, 'me', 'out', part)
                 safety.audit_record(
                     task_config, 'quota_reply_send', row['id'],
                     chat_title=row['title'], text=part, message_id=sent.id,
@@ -1924,6 +2080,8 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
     reply = (task.get('reply_text') or '').strip()
     if not reply:
         daemon_store.skip_task(queue_path, task['id'], reason='empty_reply')
+        _record_agent_event(status_path, task.get('action') or 'reply', 'skipped',
+                            reason='empty_reply')
         return last_sent_at
 
     task_config = _task_config(config, task)
@@ -1937,6 +2095,8 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
             status='blocked_forbidden_terms')
         daemon_store.skip_task(
             queue_path, task['id'], reason='forbidden_terms')
+        _record_agent_event(status_path, task.get('action') or 'reply', 'blocked',
+                            reason='forbidden_terms')
         emit('Skipped queued reply {}: forbidden terms.'.format(task['id']))
         return last_sent_at
 
@@ -1950,6 +2110,8 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
     reply = (current_task.get('reply_text') or '').strip()
     if not reply:
         daemon_store.skip_task(queue_path, task['id'], reason='empty_reply')
+        _record_agent_event(status_path, task.get('action') or 'reply', 'skipped',
+                            reason='empty_reply')
         return last_sent_at
     safety.require_can_write(task_config, row['id'])
     matches = safety.find_forbidden_terms(task_config, reply)
@@ -1961,12 +2123,16 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
             status='blocked_forbidden_terms')
         daemon_store.skip_task(
             queue_path, task['id'], reason='forbidden_terms')
+        _record_agent_event(status_path, task.get('action') or 'reply', 'blocked',
+                            reason='forbidden_terms')
         emit('Skipped queued reply {}: forbidden terms.'.format(task['id']))
         return last_sent_at
 
     reply_parts = _daemon_reply_parts(task_config, reply)
     if not reply_parts:
         daemon_store.skip_task(queue_path, task['id'], reason='empty_reply_parts')
+        _record_agent_event(status_path, task.get('action') or 'reply', 'skipped',
+                            reason='empty_reply_parts')
         return last_sent_at
     for part in reply_parts:
         safety.require_text_allowed(task_config, part)
@@ -1996,6 +2162,7 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
             chat_title=row['title'], text=reply, dry_run=True,
             status='dry_run')
         daemon_store.complete_task(queue_path, task['id'], dry_run=True)
+        _record_agent_event(status_path, task.get('action') or 'reply', 'dry_run')
         emit('DRY-RUN queued reply task={}'.format(task['id']))
         return last_sent_at
 
@@ -2027,6 +2194,8 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
         sent = await client.send_message(entity, part)
         last_sent_at = asyncio.get_running_loop().time()
         sent_ids.append(sent.id)
+        _record_memory_event(
+            config, row['id'], sent.id, None, 'me', 'out', part)
         safety.audit_record(
             task_config, 'daemon_reply_send', row['id'],
             chat_title=row['title'], text=part, message_id=sent.id,
@@ -2035,6 +2204,7 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
     daemon_store.complete_task(
         queue_path, task['id'], message_id=sent_ids[0],
         message_ids=sent_ids, dry_run=False)
+    _record_agent_event(status_path, task.get('action') or 'reply', 'sent')
     emit('SENT queued reply task={} message_ids={}'.format(
         task['id'], ','.join(str(item) for item in sent_ids)))
     return last_sent_at
@@ -2051,6 +2221,7 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
     persona = getattr(config, 'persona', {}) or {}
     reply_policy = getattr(config, 'reply_policy', {}) or {}
     initiative = getattr(config, 'initiative', {}) or {}
+    character = _character(config)
     round_config = getattr(config, 'round', {}) or {}
     daemon_config = getattr(config, 'daemon', {}) or {}
     queue_path = daemon_config['queue_path']
@@ -2074,6 +2245,8 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
             'dry_run': bool(dry_run),
             'lock': lock,
             'queue_counts': daemon_store.queue_counts(queue_path),
+            'agent_report': summarize_agent_run(
+                current.get('agent_events') or []),
         }
         if row is not None or 'chat' not in current:
             payload['chat'] = row
@@ -2120,7 +2293,8 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
         initiative_starts = 0
         recent_event_times = []
 
-        async def append_context_task(kind, prompt, messages):
+        async def append_context_task(kind, prompt, messages, action=None):
+            memory = _memory_for_task(config, row['id'])
             task = daemon_store.create_task(
                 chat=row,
                 messages=messages[-int(daemon_config['max_task_context']):],
@@ -2131,7 +2305,12 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
                 preset=preset,
                 kind=kind,
                 prompt=prompt,
-                context_summary=context_summary)
+                context_summary=context_summary,
+                character=character,
+                actions=character.get('actions'),
+                evaluators=character.get('evaluators'),
+                memory=memory,
+                action=action)
             task['dry_run'] = bool(dry_run)
             appended = daemon_store.append_task(
                 queue_path, task,
@@ -2173,9 +2352,12 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
             prompt = _initiative_instruction(
                 profile, persona, reply_policy, initiative,
                 preset=preset, idle_seconds=current_now - last_activity_at,
-                recent_messages=recent_context)
+                recent_messages=recent_context, character=character,
+                memory=_memory_for_task(config, row['id']))
             last_initiative_at = current_now
-            if await append_context_task('initiative', prompt, recent_context):
+            if await append_context_task(
+                    'initiative', prompt, recent_context,
+                    action='initiative'):
                 initiative_starts += 1
 
         while True:
@@ -2225,16 +2407,27 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
                     utils.get_display_name(sender)
                     if sender else str(item_event.sender_id))
                 text = item_event.message.message or ''
+                _record_memory_event(
+                    config, row['id'], item_event.message.id,
+                    item_event.sender_id, sender_name, 'in', text)
                 combined_text.append(text)
                 incoming_lines.append((item_event.message.id, sender_name, text))
 
-            should_prompt, reason = _should_prompt_for_text(
+            decision = evaluate_message_batch(
                 '\n'.join(combined_text),
-                reply_probability=round_config.get('reply_probability', 1.0),
-                mention_reply_probability=round_config.get(
-                    'mention_reply_probability'),
+                round_config={
+                    'reply_probability': round_config.get('reply_probability', 1.0),
+                    'mention_reply_probability': round_config.get(
+                        'mention_reply_probability'),
+                    'skip_short_ack': round_config.get('skip_short_ack', False),
+                },
+                reply_policy=reply_policy,
+                initiative=initiative,
+                character=character,
                 mentions_me=_mentions_me('\n'.join(combined_text), me_names),
-                skip_short_ack=round_config.get('skip_short_ack', False))
+                me_names=me_names)
+            should_prompt = decision['should_prompt']
+            reason = decision['reason']
             if not should_prompt:
                 emit('Skipped daemon task: {}.'.format(reason))
                 update_status(row=row, running=True)
@@ -2244,8 +2437,14 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
                 client, entity, min(round_config.get('limit', 12),
                                     daemon_config['max_task_context']))
             prompt = _daemon_task_prompt(
-                profile, persona, reply_policy, round_config)
-            await append_context_task('message', prompt, recent_context)
+                profile, persona, reply_policy, round_config,
+                initiative=initiative, character=character,
+                memory=_memory_for_task(config, row['id']),
+                recent_messages=recent_context,
+                action=_action_from_decision(decision))
+            await append_context_task(
+                'message', prompt, recent_context,
+                action=_action_from_decision(decision))
             update_status(row=row, running=True)
 
         emit('Daemon finished.')
@@ -2263,8 +2462,25 @@ async def codex_context(config, chat, limit, operator='agent', preset=None):
     persona = dict(getattr(config, 'persona', {}) or {})
     reply_policy = dict(getattr(config, 'reply_policy', {}) or {})
     initiative = dict(getattr(config, 'initiative', {}) or {})
+    character = _character(config)
     row, messages = await history(config, chat, limit)
     operator = (operator or 'agent').strip() or 'agent'
+    latest_sender_id = None
+    for item in reversed(messages):
+        if not item.get('out') and item.get('sender_id') is not None:
+            latest_sender_id = item.get('sender_id')
+            break
+    memory = _memory_for_task(config, row['id'], latest_sender_id)
+    instruction = '你是 {}。\n{}'.format(operator, build_operator_prompt(
+        operator=operator,
+        task_kind='message',
+        profile=profile,
+        persona=persona,
+        reply_policy=reply_policy,
+        initiative=initiative,
+        character=character,
+        memory=memory,
+        recent_messages=messages))
     return {
         'chat': row,
         'operator': operator,
@@ -2273,12 +2489,10 @@ async def codex_context(config, chat, limit, operator='agent', preset=None):
         'persona': persona,
         'reply_policy': reply_policy,
         'initiative': initiative,
+        'character': character,
+        'memory': memory,
         'messages': messages,
-        'instruction': (
-            '你是 {}，基于 messages 判断是否自然回复。'
-            '遵守 profile、persona、reply_policy 和 initiative 中的约束。'
-            '如果不适合回复，输出空内容；如果适合，只输出要发送的消息文本，不要解释。'
-        ).format(operator),
+        'instruction': instruction,
     }
 
 

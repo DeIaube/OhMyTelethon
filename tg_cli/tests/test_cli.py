@@ -167,6 +167,57 @@ def test_quota_parser_accepts_run_commands():
     assert reply_args.json is True
 
 
+def test_memory_parser_accepts_memory_commands():
+    parser = cli.build_parser()
+
+    remember_args = parser.parse_args([
+        'memory', 'remember', '123', '--scope', 'room',
+        '--kind', 'preference', '--text', '这个群喜欢晚上开黑。',
+        '--source-task-id', 'task-1', '--confidence', '0.7', '--json',
+    ])
+    list_args = parser.parse_args(['memory', 'list', '123', '--json'])
+
+    assert remember_args.command == 'memory'
+    assert remember_args.memory_command == 'remember'
+    assert remember_args.chat == '123'
+    assert remember_args.scope == 'room'
+    assert remember_args.kind == 'preference'
+    assert remember_args.text == '这个群喜欢晚上开黑。'
+    assert remember_args.source_task_id == 'task-1'
+    assert remember_args.confidence == 0.7
+    assert remember_args.json is True
+    assert list_args.command == 'memory'
+    assert list_args.memory_command == 'list'
+    assert list_args.chat == '123'
+    assert list_args.json is True
+
+
+def test_memory_remember_validation_error_is_reported_without_traceback(
+        tmp_path, monkeypatch, capsys):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'memory': {
+            'enabled': True,
+            'path': str(tmp_path / 'memory.sqlite3'),
+        },
+    }), encoding='utf-8')
+    monkeypatch.chdir(tmp_path)
+
+    code = cli.main([
+        '--config', str(config_path),
+        'memory', 'remember', '123',
+        '--scope', 'room',
+        '--text', 'note',
+        '--confidence', '2.0',
+        '--json',
+    ])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert 'confidence must be between 0 and 1' in captured.err
+    assert 'Traceback' not in captured.err
+
+
 def test_quota_parser_rejects_invalid_chat_targets(capsys):
     parser = cli.build_parser()
 

@@ -117,7 +117,7 @@ def test_create_run_accepts_mapping_and_chat_count_strings(tmp_path):
     assert replaced['tasks'] == []
 
 
-def test_next_target_returns_first_active_unfinished_target(tmp_path):
+def test_next_target_returns_room_with_largest_remaining_count(tmp_path):
     state_path = tmp_path / 'quota-state.json'
     quota.create_run(state_path, [(111, 1), (222, 2)], now=NOW)
 
@@ -127,8 +127,8 @@ def test_next_target_returns_first_active_unfinished_target(tmp_path):
 
     second = quota.next_target(state_path)
 
-    assert first['chat_id'] == 111
-    assert second['chat_id'] == 222
+    assert first['chat_id'] == 222
+    assert second['chat_id'] == 111
 
 
 def test_create_task_stores_context_and_get_task_returns_copy(tmp_path):

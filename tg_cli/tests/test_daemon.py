@@ -87,6 +87,29 @@ def test_create_task_can_include_context_summary():
     }
 
 
+def test_create_task_can_include_character_actions_evaluators_and_memory():
+    task = daemon.create_task(
+        chat={'id': 2400000996, 'title': 'test group'},
+        messages=[{'id': 1, 'text': 'hello'}],
+        profile={'style': 'short'},
+        persona={},
+        reply_policy={},
+        initiative={},
+        character={'name': '小林'},
+        actions=['reply', 'skip'],
+        evaluators=['not_everything'],
+        memory=[{'scope': 'room', 'content': '这个群喜欢开黑。'}],
+        action='reply',
+        now='2026-06-01T00:00:00+00:00',
+    )
+
+    assert task['character'] == {'name': '小林'}
+    assert task['actions'] == ['reply', 'skip']
+    assert task['evaluators'] == ['not_everything']
+    assert task['memory'][0]['content'] == '这个群喜欢开黑。'
+    assert task['action'] == 'reply'
+
+
 def test_append_task_respects_max_pending(tmp_path):
     queue_path = tmp_path / 'queue.json'
     first = make_task(now='2026-06-01T00:00:00+00:00')

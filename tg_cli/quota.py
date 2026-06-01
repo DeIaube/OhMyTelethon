@@ -6,6 +6,8 @@ import threading
 import uuid
 from pathlib import Path
 
+from .agent_rooms import select_next_room
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - exercised on non-POSIX platforms.
@@ -322,11 +324,18 @@ def next_target(path):
         changed = _refresh_completion(state, now_text)
         selected = None
         if state.get('status') == ACTIVE_RUN_STATUS:
+            rooms = []
             for target in state['targets']:
-                if (target.get('status') == ACTIVE_TARGET_STATUS and
-                        _target_remaining(target) > 0):
-                    selected = target
-                    break
+                rooms.append({
+                    'chat_id': target.get('chat_id'),
+                    'status': target.get('status') or ACTIVE_TARGET_STATUS,
+                    'remaining_count': _target_remaining(target),
+                    'last_sent_at': target.get('last_sent_at') or '',
+                    'target': target,
+                })
+            room = select_next_room(rooms)
+            if room is not None:
+                selected = room['target']
         if changed:
             _save_state_unlocked(path, state)
         return _deepcopy_json(selected) if selected is not None else None

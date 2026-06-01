@@ -21,6 +21,7 @@ export TG_CLI_SESSION=/absolute/path/to/printer.session
 Optional local config can live in `tg_cli/.tg-cli.json`. That file is ignored by git. Start from `tg_cli/tg-cli.example.json`.
 
 Profile fields are optional and default to safe game-round guidance. Social Policy is split into three layers: `persona` says "像谁", `reply_policy` says "怎么接话", and `initiative` says "怎么主动开口". See `tg_cli/docs/profile-config.md` for the full profile schema, preset behavior, prompt behavior, and local safety filtering rules.
+The agent runtime also accepts an elizaOS-inspired `character` block and optional local `memory`. `character` adds action/evaluator hints such as `reply`, `light_joke`, `skip_short_ack`, and `no_identity_claims`; `memory` stores concise room/user notes in a local SQLite file when explicitly enabled. See `tg_cli/docs/elizaos-inspired-runtime.md`.
 For a profile-only starter that contains no credentials, copy `tg_cli/docs/local-profile-template.json` into your local `tg_cli/.tg-cli.json` and add credentials through environment variables.
 Round behavior can also live in `tg_cli/.tg-cli.json`, so day-to-day runs can be as short as `tg-cli game round 5217114569`. Multiple named presets can live under `presets`, then selected with `--preset NAME` for `game suggest`, `game round`, `daemon run`, or `quota start`. Keep initiative disabled or low-frequency by default; use explicit presets such as `chat_normal` or `chat_social` for bounded tests. `chat_social` can set an `initiative.min_starts` floor so a five-minute run produces bounded, content-aware proactive opportunities even if the group keeps moving, and `initiative.allow_topic_shift` lets it start a safe fallback topic instead of engaging ads, spam, or grey-area context.
 
@@ -67,15 +68,20 @@ tg-cli quota next --json
 tg-cli quota reply <task_id> "这把先看看队友怎么说" --dry-run --json
 tg-cli quota reply <task_id> "这把先看看队友怎么说" --json
 tg-cli quota stop
+tg-cli memory remember 5217114569 --scope room --kind summary --text "这个群最近在聊晚上开黑。"
+tg-cli memory remember 5217114569 --scope user --sender-id 123456 --sender-name "阿强" --kind preference --text "阿强常接游戏话题。"
+tg-cli memory list 5217114569 --json
 ```
 
 `game context` does not call an LLM. It reads a larger recent-history window and prints an agent-ready warmup summary: active speakers, local keyword/topic signals, notice/bot messages, recent questions, a compact summary, guidance, and a small message tail. Use it before daemon or longer live tests so the external agent knows what the group has recently been discussing without copying hundreds of raw messages into each task.
 
-`game suggest` does not call an LLM. It prints an agent-ready reply context bundle with the selected `preset` name plus resolved `profile`, `persona`, `reply_policy`, and `initiative`. Codex, Claude, or another external agent decides the reply, then sends through `tg-cli send`.
+`game suggest` does not call an LLM. It prints an agent-ready reply context bundle with the selected `preset` name plus resolved `profile`, `persona`, `reply_policy`, `initiative`, `character`, and relevant `memory` snippets. Codex, Claude, or another external agent decides the reply, then sends through `tg-cli send`.
 
 `game round` is the bounded live game loop. It listens for new messages, prints recent context plus a compact agent instruction, asks the current operator for a reply, sends through the safety layer, and exits when `--duration` or `--max-replies` is reached. `--max-replies` is enforced as an outbound Telegram message cap, so a split reply will not exceed the cap. Use empty input to skip the current message and `/quit` to stop the round. At the end it prints a structured round report with elapsed time, received message counts, prompt count, sent reply count, sent message ids, skip reasons, average reply length, and initiative counts.
 
-`daemon` is the v0.4 long-running operator mode. It still does not call an LLM or model provider. `tg-cli daemon run <chat>` owns Telegram IO for one whitelisted chat, writes local pending tasks when the account may naturally reply or open a light topic, and keeps local status/lock files. Codex, Claude, or another external agent claims the next pending item with `daemon next`, then either queues a reply with `daemon reply <task_id> "..."` or skips it with `daemon skip <task_id>`. The foreground daemon sends queued replies from the same Telethon session, so queue commands do not open Telegram while the daemon is running. Every send still goes through whitelist, `pause`, forbidden-term checks, daemon rate limits, dry-run behavior where applicable, and audit logging. More active presets can use `initiative.min_starts`, `initiative.min_start_after`, reply splitting, and preset-level daemon rate caps, but splitting is for natural separate thoughts rather than increasing message count.
+`daemon` is the v0.4 long-running operator mode. It still does not call an LLM or model provider. `tg-cli daemon run <chat>` owns Telegram IO for one whitelisted chat, writes local pending tasks when the account may naturally reply or open a light topic, and keeps local status/lock files. Codex, Claude, or another external agent claims the next pending item with `daemon next`, then either queues a reply with `daemon reply <task_id> "..."` or skips it with `daemon skip <task_id>`. The foreground daemon sends queued replies from the same Telethon session, so queue commands do not open Telegram while the daemon is running. Every send still goes through whitelist, `pause`, forbidden-term checks, daemon rate limits, dry-run behavior where applicable, and audit logging. More active presets can use `initiative.min_starts`, `initiative.min_start_after`, character action/evaluator hints, reply splitting, and preset-level daemon rate caps, but splitting is for natural separate thoughts rather than increasing message count.
+
+`memory` manages optional local room/user notes. It is off by default and stores short operator-authored summaries, preferences, or recurring topic notes. Event records store message hashes and lengths, not raw text. Use memory to help Codex remember stable group context without building a raw Telegram archive.
 
 Suggested first Social Policy test:
 
@@ -132,7 +138,7 @@ tg-cli quota reply <task_id> "这把先看看队友怎么说" --json
 tg-cli quota stop
 ```
 
-`quota next --json` selects the next active target chat, creates or claims one task, and returns bounded context plus resolved `profile`, `persona`, `reply_policy`, `initiative`, `round`, and `preset` guidance. `quota reply` sends one operator-written reply for that task. Use `--dry-run` for new groups or changed presets: it validates whitelist, pause, forbidden terms, split/remaining-count behavior, and audit behavior without sending, consuming the task, or incrementing counts.
+`quota next --json` selects the next active target chat, creates or claims one task, and returns bounded context plus resolved `profile`, `persona`, `reply_policy`, `initiative`, `character`, `memory`, `round`, and `preset` guidance. `quota reply` sends one operator-written reply for that task. Use `--dry-run` for new groups or changed presets: it validates whitelist, pause, forbidden terms, split/remaining-count behavior, and audit behavior without sending, consuming the task, or incrementing counts.
 
 Counting rules are deliberately strict:
 
@@ -154,6 +160,7 @@ Quota mode is not a scheduler and does not call a model provider. It is the send
 - `--dry-run` resolves and audits without sending.
 - `profile.forbidden_terms` and `profile.avoid_topics` block outbound text before `client.send_message`.
 - `persona`, `reply_policy`, and `initiative` are prompt guidance only. They do not authorize sending to non-whitelisted chats, bypass `pause`, bypass forbidden terms, skip rate limits, hide audit records, or suppress the round report.
+- `character`, `actions`, `evaluators`, and `memory` are prompt/task context only. They do not grant extra send permission or bypass any safety control.
 - `game round` rate-limits sends and stops prompting near the end of a bounded round.
 - `game round` can skip low-information messages, skip by probability, merge rapid messages, and delay sends without becoming a daemon or auto mode.
 - `daemon run` uses a single-instance lock so two daemons do not write the same queue/session at the same time.

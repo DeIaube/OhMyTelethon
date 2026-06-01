@@ -25,6 +25,8 @@ The `game suggest` JSON output includes:
 - `persona`: generic account voice guidance.
 - `reply_policy`: reply/skip guidance.
 - `initiative`: bounded proactive-opening guidance.
+- `character`: elizaOS-inspired voice, action, and evaluator hints.
+- `memory`: optional local room/user memory snippets when memory is enabled.
 - `messages`: recent Telegram messages in chronological order.
 - `instruction`: a ready-to-use prompt for the external agent.
 
@@ -33,6 +35,7 @@ Social Policy has three layers:
 - `persona`: 像谁. Use it as a generic example voice, not a real-person binding.
 - `reply_policy`: 怎么接话. Use it to decide whether to answer, skip, ask briefly, or stay uncertain.
 - `initiative`: 怎么主动开口. Use it only as bounded operator guidance for low-frequency proactive openings.
+- `character`: 像 elizaOS character file, but local and lightweight. Use `actions` and `evaluators` as hints, not permission grants.
 
 After choosing a reply, send it through the safety layer:
 
@@ -40,6 +43,16 @@ After choosing a reply, send it through the safety layer:
 tg-cli send 2400000996 "这把感觉能打，先看看队友怎么说" --dry-run --json
 tg-cli send 2400000996 "这把感觉能打，先看看队友怎么说" --yes --json
 ```
+
+After replying or skipping a task, Codex may store a concise memory only when it is useful for future conversations:
+
+```sh
+tg-cli memory remember 2400000996 --scope room --kind summary --text "这个群最近在聊晚上开黑。" --source-task-id TASK_ID
+tg-cli memory remember 2400000996 --scope user --sender-id 123456 --sender-name "阿强" --kind preference --text "阿强常接游戏话题。" --source-task-id TASK_ID
+tg-cli memory list 2400000996 --json
+```
+
+Do not store raw private messages. Store short summaries, preferences, recurring group topics, or explicit user-provided facts.
 
 ## Live Round
 
@@ -95,7 +108,7 @@ tg-cli daemon stop
 
 Expected operator loop:
 
-- Run `daemon next --json` to claim one pending task with recent context and resolved `profile`, `persona`, `reply_policy`, and `initiative`. The claim lease expires after `daemon.claim_ttl`; use `daemon next --peek --json` only when inspecting without taking the task.
+- Run `daemon next --json` to claim one pending task with recent context and resolved `profile`, `persona`, `reply_policy`, `initiative`, `character`, `actions`, `evaluators`, and relevant `memory`. The claim lease expires after `daemon.claim_ttl`; use `daemon next --peek --json` only when inspecting without taking the task.
 - Decide outside the CLI whether a normal person would reply, skip, or wait.
 - Use `daemon reply <task_id> "..." --dry-run` for the first pass in a new group or config; it validates and audits without sending or consuming the task.
 - Use `daemon reply <task_id> "..."` only when the message is natural and still relevant. With `round.split_long_replies`, a reply can be split into short Telegram messages only when the parts are naturally separate thoughts.
@@ -131,7 +144,7 @@ tg-cli quota status --json
 Expected flow:
 
 - Run `quota status --json` before starting the loop to see `target_count`, `sent_count`, `remaining_count`, and per-chat status.
-- Run `quota next --json` to claim one task from the next active target chat. The payload should include bounded recent context and resolved `profile`, `persona`, `reply_policy`, `initiative`, `round`, and `preset`.
+- Run `quota next --json` to claim one task from the next active target chat. The payload should include bounded recent context and resolved `profile`, `persona`, `reply_policy`, `initiative`, `character`, `actions`, `evaluators`, `memory`, `round`, and `preset`.
 - Decide outside the CLI whether a normal person would reply, skip, or wait. The CLI still does not call Codex, Claude, OpenAI, Anthropic, or any model provider.
 - Use `quota reply <task_id> "..." --dry-run --json` for a new group, new preset, or suspicious context. Dry-run validates whitelist, `pause`, forbidden terms, and audit behavior without sending, consuming the task, or incrementing counts.
 - Use `quota reply <task_id> "..." --json` only when the message is natural and still relevant. If reply splitting is enabled, each sent Telegram message part is counted separately.

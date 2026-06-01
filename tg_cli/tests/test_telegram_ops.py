@@ -3,6 +3,7 @@ import copy
 from types import SimpleNamespace
 
 from tg_cli.config import AppConfig
+from tg_cli.agent_memory import MemoryStore
 from tg_cli import daemon
 from tg_cli import safety
 from tg_cli import telegram_ops
@@ -138,6 +139,20 @@ def test_emit_falls_back_for_simple_output_func():
     telegram_ops._emit(output, 'hello')
 
     assert calls == ['hello']
+
+
+def test_memory_for_task_honors_zero_task_memory_limit(tmp_path):
+    config = make_config(tmp_path)
+    memory_path = tmp_path / 'memory.sqlite3'
+    store = MemoryStore(memory_path)
+    store.remember(chat_id=5217114569, scope='room', content='should stay local')
+    config.memory = {
+        'enabled': True,
+        'path': memory_path,
+        'max_task_memories': 0,
+    }
+
+    assert telegram_ops._memory_for_task(config, 5217114569) == []
 
 
 def test_codex_context_includes_full_profile_and_operator(monkeypatch, tmp_path):
