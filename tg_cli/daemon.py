@@ -1,15 +1,30 @@
 import copy
+import contextlib
 import datetime as _dt
 import json
 import os
+import threading
 import uuid
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on non-POSIX platforms.
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - exercised on non-Windows platforms.
+    msvcrt = None
 
 
 DEFAULT_QUEUE = {
     'version': 1,
     'tasks': [],
 }
+
+_QUEUE_THREAD_LOCKS = {}
+_QUEUE_THREAD_LOCKS_GUARD = threading.Lock()
 
 
 class DaemonLockError(RuntimeError):
@@ -65,7 +80,45 @@ def _atomic_write_json(path, payload):
     temp.replace(target)
 
 
-def load_queue(path):
+def _queue_lock_path(path):
+    target = _path(path)
+    return target.with_name('{}.lock'.format(target.name))
+
+
+def _queue_thread_lock(lock_path):
+    key = str(_path(lock_path).resolve())
+    with _QUEUE_THREAD_LOCKS_GUARD:
+        lock = _QUEUE_THREAD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _QUEUE_THREAD_LOCKS[key] = lock
+        return lock
+
+
+@contextlib.contextmanager
+def _locked_queue(path):
+    lock_path = _queue_lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    thread_lock = _queue_thread_lock(lock_path)
+    with thread_lock:
+        with lock_path.open('a+', encoding='utf-8') as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            elif msvcrt is not None:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                raise DaemonLockError(
+                    'Queue file locking is not supported on this platform.')
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                elif msvcrt is not None:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def _load_queue_unlocked(path):
     target = _path(path)
     if not target.is_file():
         return _deepcopy_json(DEFAULT_QUEUE)
@@ -80,7 +133,11 @@ def load_queue(path):
     return payload
 
 
-def save_queue(path, payload):
+def load_queue(path):
+    return _load_queue_unlocked(path)
+
+
+def _save_queue_unlocked(path, payload):
     queue = _deepcopy_json(payload)
     if not isinstance(queue, dict):
         raise ValueError('Queue payload must be a JSON object.')
@@ -90,6 +147,11 @@ def save_queue(path, payload):
         raise ValueError('Queue payload tasks must be a list.')
     _atomic_write_json(path, queue)
     return queue
+
+
+def save_queue(path, payload):
+    with _locked_queue(path):
+        return _save_queue_unlocked(path, payload)
 
 
 def create_task(chat, messages, profile, persona, reply_policy, initiative,
@@ -119,12 +181,13 @@ def _pending_count(tasks):
 
 
 def append_task(path, task, max_pending=None):
-    queue = load_queue(path)
-    if max_pending is not None and _pending_count(queue['tasks']) >= int(max_pending):
-        return False
-    queue['tasks'].append(_deepcopy_json(task))
-    save_queue(path, queue)
-    return True
+    with _locked_queue(path):
+        queue = _load_queue_unlocked(path)
+        if max_pending is not None and _pending_count(queue['tasks']) >= int(max_pending):
+            return False
+        queue['tasks'].append(_deepcopy_json(task))
+        _save_queue_unlocked(path, queue)
+        return True
 
 
 def _is_expired(task, now_dt, task_ttl):
@@ -140,46 +203,56 @@ def _is_expired(task, now_dt, task_ttl):
 
 
 def next_pending_task(path, now=None, task_ttl=None):
-    queue = load_queue(path)
-    now_text = _iso_utc(now)
-    now_dt = _parse_time(now_text)
-    changed = False
-    oldest = None
-    oldest_created_at = None
+    with _locked_queue(path):
+        queue = _load_queue_unlocked(path)
+        now_text = _iso_utc(now)
+        now_dt = _parse_time(now_text)
+        changed = False
+        oldest = None
+        oldest_created_at = None
 
-    for task in queue['tasks']:
-        if task.get('status') != 'pending':
-            continue
-        if _is_expired(task, now_dt, task_ttl):
-            task['status'] = 'expired'
-            task['updated_at'] = now_text
-            changed = True
-            continue
-        created_at = _parse_time(task.get('created_at')) or now_dt
-        if oldest is None or created_at < oldest_created_at:
-            oldest = task
-            oldest_created_at = created_at
+        for task in queue['tasks']:
+            if task.get('status') != 'pending':
+                continue
+            if _is_expired(task, now_dt, task_ttl):
+                task['status'] = 'expired'
+                task['updated_at'] = now_text
+                changed = True
+                continue
+            created_at = _parse_time(task.get('created_at')) or now_dt
+            if oldest is None or created_at < oldest_created_at:
+                oldest = task
+                oldest_created_at = created_at
 
-    if changed:
-        save_queue(path, queue)
-    return _deepcopy_json(oldest) if oldest is not None else None
+        if changed:
+            _save_queue_unlocked(path, queue)
+        return _deepcopy_json(oldest) if oldest is not None else None
 
 
 def _update_task(path, task_id, status, fields=None, now=None,
                  allowed_statuses=('pending',)):
+    with _locked_queue(path):
+        queue = _load_queue_unlocked(path)
+        now_text = _iso_utc(now)
+        fields = fields or {}
+        for task in queue['tasks']:
+            if task.get('id') != task_id:
+                continue
+            if allowed_statuses is not None and task.get('status') not in allowed_statuses:
+                return None
+            task['status'] = status
+            task['updated_at'] = now_text
+            task.update(fields)
+            _save_queue_unlocked(path, queue)
+            return _deepcopy_json(task)
+        return None
+
+
+def get_task(path, task_id):
     queue = load_queue(path)
-    now_text = _iso_utc(now)
-    fields = fields or {}
     for task in queue['tasks']:
-        if task.get('id') != task_id:
-            continue
-        if allowed_statuses is not None and task.get('status') not in allowed_statuses:
-            return None
-        task['status'] = status
-        task['updated_at'] = now_text
-        task.update(fields)
-        save_queue(path, queue)
-        return _deepcopy_json(task)
+        if task.get('id') == task_id:
+            return _deepcopy_json(task)
     return None
 
 
@@ -334,6 +407,20 @@ def acquire_lock(path, owner=None, stale_after=3600):
                           sort_keys=True)
                 handle.write('\n')
             return payload
+
+
+def refresh_lock(path, owner=None, now=None):
+    target = _path(path)
+    if not target.is_file():
+        raise DaemonLockError('Daemon lock does not exist.')
+    payload = _load_lock(target)
+    if owner is not None and payload.get('owner') != owner:
+        raise DaemonLockError(
+            'Daemon lock is held by owner={}, not {}.'.format(
+                payload.get('owner'), owner))
+    payload['updated_at'] = _iso_utc(now)
+    _atomic_write_json(target, payload)
+    return payload
 
 
 def release_lock(path, owner=None):

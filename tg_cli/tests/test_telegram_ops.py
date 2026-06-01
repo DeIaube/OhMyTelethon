@@ -16,6 +16,14 @@ def make_config(tmp_path, profile=None):
         state_path=tmp_path / '.tg-cli-state.json',
         audit_log_path=tmp_path / 'tg-cli.audit.log',
         profile=profile,
+        daemon_config={
+            'queue_path': str(tmp_path / 'queue.json'),
+            'lock_path': str(tmp_path / 'daemon.lock'),
+            'status_path': str(tmp_path / 'status.json'),
+            'min_reply_interval': 1.0,
+            'max_messages_per_hour': 20,
+            'max_consecutive_replies': 20,
+        },
     )
 
 
@@ -257,6 +265,113 @@ def test_daemon_reply_counts_ignore_current_reply_pending_task(tmp_path):
         5217114569,
         now=telegram_ops._daemon_parse_time('2026-06-01T00:01:00+00:00')) == (
             2, 2)
+
+
+def test_daemon_send_reply_rechecks_stop_after_rate_limit_sleep(
+        tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    task = daemon.create_task(
+        chat={'id': 5217114569, 'title': 'chat'},
+        messages=[],
+        profile={},
+        persona={},
+        reply_policy={},
+        initiative={},
+        now='2026-06-01T00:00:00+00:00')
+    daemon.append_task(config.daemon['queue_path'], task)
+    queued = daemon.queue_reply_task(config.daemon['queue_path'], task['id'], '来了')
+    sent_texts = []
+
+    class FakeClient:
+        async def send_message(self, entity, text):
+            sent_texts.append((entity, text))
+            return SimpleNamespace(id=77)
+
+    async def fake_sleep(delay):
+        daemon.request_stop(config.daemon['status_path'])
+
+    monkeypatch.setattr(telegram_ops.asyncio, 'sleep', fake_sleep)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        return await telegram_ops._daemon_send_reply_task(
+            FakeClient(),
+            entity='entity',
+            config=config,
+            row={'id': 5217114569, 'title': 'chat'},
+            task=queued,
+            last_sent_at=loop.time(),
+            dry_run=False,
+            emit=lambda text='': None)
+
+    assert asyncio.run(run()) is not None
+    assert sent_texts == []
+    saved = daemon.get_task(config.daemon['queue_path'], task['id'])
+    assert saved['status'] == 'reply_pending'
+
+
+def test_daemon_run_releases_lock_when_client_start_fails(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    disconnected = []
+
+    class FailingClient:
+        async def start(self):
+            raise RuntimeError('start failed')
+
+        async def disconnect(self):
+            disconnected.append(True)
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: FailingClient())
+
+    with pytest.raises(RuntimeError, match='start failed'):
+        asyncio.run(telegram_ops.daemon_run(
+            config, '5217114569', duration=1,
+            output_func=lambda text='': None))
+
+    assert disconnected == [True]
+    assert config.daemon['lock_path'].exists() is False
+
+
+def test_daemon_run_refreshes_lock_on_status_updates(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    refresh_owners = []
+    original_refresh_lock = daemon.refresh_lock
+
+    class FakeClient:
+        async def start(self):
+            return None
+
+        async def get_me(self):
+            return SimpleNamespace(
+                id=999, username='agent', first_name='Agent', last_name=None)
+
+        def on(self, event):
+            def decorator(handler):
+                return handler
+            return decorator
+
+        async def disconnect(self):
+            return None
+
+    async def fake_resolve_chat(client, chat):
+        return 'entity', {'id': 5217114569, 'title': 'chat'}
+
+    def wrapped_refresh_lock(path, owner=None, now=None):
+        refresh_owners.append(owner)
+        return original_refresh_lock(path, owner=owner, now=now)
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: FakeClient())
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    monkeypatch.setattr(
+        telegram_ops.daemon_store, 'refresh_lock', wrapped_refresh_lock)
+
+    asyncio.run(telegram_ops.daemon_run(
+        config, '5217114569', duration=0,
+        output_func=lambda text='': None))
+
+    assert len(refresh_owners) >= 2
+    assert all(owner and owner.startswith('tg-cli-daemon:') for owner in refresh_owners)
+    assert config.daemon['lock_path'].exists() is False
 
 
 def test_round_report_tracks_and_formats_summary():

@@ -1,5 +1,7 @@
 import json
 import os
+import threading
+import time
 
 import pytest
 
@@ -72,6 +74,54 @@ def test_append_task_respects_max_pending(tmp_path):
 
     queue = daemon.load_queue(queue_path)
     assert [task['id'] for task in queue['tasks']] == [first['id']]
+
+
+def test_append_task_serializes_read_modify_write(tmp_path, monkeypatch):
+    queue_path = tmp_path / 'queue.json'
+    first = make_task(now='2026-06-01T00:00:00+00:00')
+    second = make_task(now='2026-06-01T00:00:01+00:00')
+    original_write = daemon._atomic_write_json
+    first_write_started = threading.Event()
+    release_first_write = threading.Event()
+    write_count = 0
+    count_lock = threading.Lock()
+    errors = []
+
+    def slow_first_write(path, payload):
+        nonlocal write_count
+        with count_lock:
+            write_count += 1
+            is_first_write = write_count == 1
+        if is_first_write:
+            first_write_started.set()
+            release_first_write.wait(timeout=2.0)
+        return original_write(path, payload)
+
+    monkeypatch.setattr(daemon, '_atomic_write_json', slow_first_write)
+
+    def append(task):
+        try:
+            daemon.append_task(queue_path, task)
+        except Exception as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    first_thread = threading.Thread(target=append, args=(first,))
+    first_thread.start()
+    assert first_write_started.wait(timeout=1.0)
+
+    second_thread = threading.Thread(target=append, args=(second,))
+    second_thread.start()
+    time.sleep(0.05)
+    release_first_write.set()
+    first_thread.join(timeout=2.0)
+    second_thread.join(timeout=2.0)
+
+    assert errors == []
+    assert first_thread.is_alive() is False
+    assert second_thread.is_alive() is False
+    queue = daemon.load_queue(queue_path)
+    assert sorted(task['id'] for task in queue['tasks']) == sorted([
+        first['id'], second['id']])
 
 
 def test_next_pending_task_expires_old_tasks_and_returns_oldest_live(tmp_path):
@@ -204,3 +254,19 @@ def test_lock_acquire_replaces_stale_lock(tmp_path):
     assert lock['owner'] == 'fresh-worker'
     saved = json.loads(lock_path.read_text(encoding='utf-8'))
     assert saved['owner'] == 'fresh-worker'
+
+
+def test_refresh_lock_updates_owner_timestamp(tmp_path):
+    lock_path = tmp_path / 'daemon.lock'
+    daemon.acquire_lock(lock_path, owner='worker-a')
+
+    refreshed = daemon.refresh_lock(
+        lock_path, owner='worker-a',
+        now='2026-06-01T00:01:00+00:00')
+
+    assert refreshed['owner'] == 'worker-a'
+    assert refreshed['updated_at'] == '2026-06-01T00:01:00+00:00'
+    saved = json.loads(lock_path.read_text(encoding='utf-8'))
+    assert saved['updated_at'] == '2026-06-01T00:01:00+00:00'
+    with pytest.raises(daemon.DaemonLockError):
+        daemon.refresh_lock(lock_path, owner='worker-b')

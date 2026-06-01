@@ -1101,6 +1101,7 @@ def _daemon_reply_counts(queue_path, chat_id, now=None):
 async def _daemon_send_reply_task(client, entity, config, row, task,
                                   last_sent_at, dry_run, emit):
     queue_path = config.daemon['queue_path']
+    status_path = config.daemon['status_path']
     reply = (task.get('reply_text') or '').strip()
     if not reply:
         daemon_store.skip_task(queue_path, task['id'], reason='empty_reply')
@@ -1127,6 +1128,30 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
         emit('Daemon rate limit: waiting {:.1f}s before send.'.format(delay))
         await asyncio.sleep(delay)
 
+    if daemon_store.stop_requested(status_path):
+        emit('Queued reply {} held: stop requested.'.format(task['id']))
+        return last_sent_at
+    current_task = daemon_store.get_task(queue_path, task['id'])
+    if current_task is None or current_task.get('status') != 'reply_pending':
+        emit('Queued reply {} held: task status changed.'.format(task['id']))
+        return last_sent_at
+    reply = (current_task.get('reply_text') or '').strip()
+    if not reply:
+        daemon_store.skip_task(queue_path, task['id'], reason='empty_reply')
+        return last_sent_at
+    safety.require_can_write(task_config, row['id'])
+    matches = safety.find_forbidden_terms(task_config, reply)
+    if matches:
+        safety.audit_record(
+            task_config, 'daemon_reply_send', row['id'],
+            chat_title=row['title'], text=reply,
+            dry_run=bool(dry_run or current_task.get('reply_dry_run')),
+            status='blocked_forbidden_terms')
+        daemon_store.skip_task(
+            queue_path, task['id'], reason='forbidden_terms')
+        emit('Skipped queued reply {}: forbidden terms.'.format(task['id']))
+        return last_sent_at
+
     hourly, consecutive = _daemon_reply_counts(queue_path, row['id'])
     if hourly >= int(config.daemon['max_messages_per_hour']):
         emit('Queued reply {} held: hourly daemon limit reached.'.format(
@@ -1137,7 +1162,7 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
             task['id']))
         return last_sent_at
 
-    if dry_run or task.get('reply_dry_run'):
+    if dry_run or current_task.get('reply_dry_run'):
         safety.audit_record(
             task_config, 'daemon_reply_send', row['id'],
             chat_title=row['title'], text=reply, dry_run=True,
@@ -1179,15 +1204,11 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
     lock = daemon_store.acquire_lock(
         lock_path, owner=owner,
         stale_after=daemon_config.get('stale_lock_after', 3600.0))
-    daemon_store.clear_stop(status_path)
-
-    client = _client(config)
-    await client.start()
-    queue = asyncio.Queue()
-    seen_ids = set()
-    last_sent_at = None
+    client = None
 
     def update_status(row=None, running=True):
+        nonlocal lock
+        lock = daemon_store.refresh_lock(lock_path, owner=owner)
         current = daemon_store.read_status(status_path)
         payload = {
             'running': bool(running),
@@ -1204,6 +1225,14 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
         daemon_store.write_status(status_path, current)
 
     try:
+        daemon_store.clear_stop(status_path)
+
+        client = _client(config)
+        await client.start()
+        queue = asyncio.Queue()
+        seen_ids = set()
+        last_sent_at = None
+
         me = await client.get_me()
         me_names = _mention_names(me)
         entity, row = await resolve_chat(client, chat)
@@ -1356,7 +1385,8 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
         try:
             update_status(running=False)
         finally:
-            await client.disconnect()
+            if client is not None:
+                await client.disconnect()
             daemon_store.release_lock(lock_path, owner=owner)
 
 

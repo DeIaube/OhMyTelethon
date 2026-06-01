@@ -13,6 +13,7 @@
 .tg-cli.json
 .tg-cli-state.json
 .tg-cli-daemon-queue.json
+.tg-cli-daemon-queue.json.lock
 .tg-cli-daemon-status.json
 .tg-cli-daemon.lock
 tg-cli.audit.log
