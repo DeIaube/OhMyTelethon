@@ -20,6 +20,7 @@ Current capabilities:
 - `tg-cli game suggest <chat>`: print a Codex-ready context bundle, including the resolved profile, without sending.
 - `tg-cli game round <chat> --duration 60 --max-replies 8`: run a bounded interactive chat round where Codex supplies replies and the CLI sends them through the safety layer.
 - `tg-cli game round <chat> --quiet-context --min-reply-interval 2 --end-buffer 5`: run the compact one-minute operator loop with repeated context reduced, send spacing, and an end-of-round buffer.
+- `tg-cli game round <chat> --reply-probability 0.7 --random-delay-min 1 --random-delay-max 4 --skip-short-ack --merge-window 2`: make the bounded operator loop less mechanical without entering daemon/auto mode.
 
 Profile config:
 
@@ -34,6 +35,7 @@ Safety rules:
 - Never send to chats outside `allowed_chats`.
 - Keep `pause` as a global write stop.
 - Keep `game round` rate-limit and end-buffer checks local and testable.
+- Keep `game round` human-likeness gates local and testable: probability skip, short-ack skip, merge-window, mention probability, and random delay must not bypass safety checks.
 - Audit logs must not store raw message text, API hash, phone number, or session bytes.
 - Keep auto/daemon behavior out of v0.2; use bounded `game round` for live tests.
 - If CLI behavior, commands, safety rules, config, or file layout changes, update this file and the relevant `tg_cli/` documentation in the same change.

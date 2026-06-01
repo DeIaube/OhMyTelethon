@@ -81,6 +81,24 @@ def build_parser():
     round_cmd.add_argument(
         '--end-buffer', type=float, default=5.0,
         help='Stop prompting when less than this many seconds remain.')
+    round_cmd.add_argument(
+        '--reply-probability', type=float, default=1.0,
+        help='Probability of prompting for a reply to each inbound message or merged batch.')
+    round_cmd.add_argument(
+        '--mention-reply-probability', type=float,
+        help='Override reply probability when inbound text appears to mention the logged-in account.')
+    round_cmd.add_argument(
+        '--random-delay-min', type=float, default=0.0,
+        help='Minimum human-like delay before sending a typed round reply.')
+    round_cmd.add_argument(
+        '--random-delay-max', type=float, default=0.0,
+        help='Maximum human-like delay before sending a typed round reply.')
+    round_cmd.add_argument(
+        '--skip-short-ack', action='store_true',
+        help='Skip low-information acknowledgements such as 嗯, 哈哈, or 真的假的.')
+    round_cmd.add_argument(
+        '--merge-window', type=float, default=0.0,
+        help='Seconds to collect rapid consecutive inbound messages before one prompt.')
 
     return parser
 
@@ -155,7 +173,13 @@ async def _cmd_game(args, config):
             max_replies=args.max_replies, include_self=args.include_self,
             quiet_context=args.quiet_context,
             min_reply_interval=args.min_reply_interval,
-            end_buffer=args.end_buffer)
+            end_buffer=args.end_buffer,
+            reply_probability=args.reply_probability,
+            mention_reply_probability=args.mention_reply_probability,
+            random_delay_min=args.random_delay_min,
+            random_delay_max=args.random_delay_max,
+            skip_short_ack=args.skip_short_ack,
+            merge_window=args.merge_window)
         return
     raise AssertionError(args.game_command)
 

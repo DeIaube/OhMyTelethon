@@ -1,6 +1,8 @@
 import asyncio
 import datetime as _dt
 import json
+import random
+import string
 
 from telethon import TelegramClient, events, utils
 from telethon.tl.types import Channel, Chat, User
@@ -82,6 +84,107 @@ def _round_instruction(profile):
         'Codex instruction: reply with one chat message only; {}. '
         'Use empty input to skip or /quit to stop.'
     ).format(_format_profile_guidance(profile))
+
+
+_SHORT_ACKS = {
+    '嗯', '恩', '哦', '噢', '昂', '啊', '行', '好', '好吧', '行吧',
+    '哈哈', '哈哈哈', '呵呵', '笑死', '真的假的', '真的啊', '是吗',
+    'ok', 'okay', 'yes', 'no', 'lol', 'haha',
+}
+
+
+def _compact_text(text):
+    punctuation = string.punctuation + '，。！？、；：「」『』（）【】《》… '
+    return ''.join(ch for ch in (text or '').casefold().strip()
+                   if ch not in punctuation)
+
+
+def _is_short_ack(text):
+    compact = _compact_text(text)
+    if not compact:
+        return True
+    return compact in _SHORT_ACKS or len(compact) <= 1
+
+
+def _mention_names(me):
+    names = []
+    for attr in ('username', 'first_name', 'last_name'):
+        value = getattr(me, attr, None)
+        if value:
+            names.append(str(value))
+    display = utils.get_display_name(me) if me else None
+    if display:
+        names.append(display)
+    return tuple(dict.fromkeys(x.casefold() for x in names if x))
+
+
+def _mentions_me(text, names):
+    haystack = (text or '').casefold()
+    return any(name and name in haystack for name in names)
+
+
+def _validate_probability(value, name):
+    value = float(value)
+    if value < 0.0 or value > 1.0:
+        raise TelegramCliError('{} must be between 0 and 1.'.format(name))
+    return value
+
+
+def _validate_nonnegative(value, name):
+    value = float(value)
+    if value < 0.0:
+        raise TelegramCliError('{} must be greater than or equal to 0.'.format(name))
+    return value
+
+
+def _should_prompt_for_text(text, reply_probability=1.0,
+                            mention_reply_probability=None, mentions_me=False,
+                            skip_short_ack=False, random_value=None):
+    if skip_short_ack and _is_short_ack(text):
+        return False, 'short_ack'
+
+    probability = reply_probability
+    if mentions_me and mention_reply_probability is not None:
+        probability = mention_reply_probability
+    probability = _validate_probability(probability, 'reply probability')
+
+    if probability >= 1.0:
+        return True, 'prompt'
+    if probability <= 0.0:
+        return False, 'probability'
+
+    draw = random.random() if random_value is None else float(random_value)
+    if draw <= probability:
+        return True, 'prompt'
+    return False, 'probability'
+
+
+def _random_reply_delay(delay_min, delay_max, random_func=None):
+    delay_min = _validate_nonnegative(delay_min, 'random delay min')
+    delay_max = _validate_nonnegative(delay_max, 'random delay max')
+    if delay_max < delay_min:
+        raise TelegramCliError('random delay max must be greater than or equal to min.')
+    if delay_max == 0.0:
+        return 0.0
+    random_func = random_func or random.uniform
+    return float(random_func(delay_min, delay_max))
+
+
+async def _collect_merged_events(queue, first_event, merge_window, end_at, loop):
+    events_ = [first_event]
+    merge_window = _validate_nonnegative(merge_window, 'merge window')
+    if merge_window <= 0.0:
+        return events_
+
+    deadline = min(end_at, loop.time() + merge_window)
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return events_
+        try:
+            events_.append(await asyncio.wait_for(queue.get(), timeout=remaining))
+        except asyncio.TimeoutError:
+            return events_
 
 
 async def get_me(config):
@@ -239,8 +342,22 @@ async def _recent_context_lines(client, entity, limit):
 async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                             include_self=False, quiet_context=False,
                             min_reply_interval=2.0, end_buffer=5.0,
+                            reply_probability=1.0,
+                            mention_reply_probability=None,
+                            random_delay_min=0.0, random_delay_max=0.0,
+                            skip_short_ack=False, merge_window=0.0,
                             input_func=input, output_func=print):
     config.require_credentials()
+    reply_probability = _validate_probability(reply_probability, 'reply probability')
+    if mention_reply_probability is not None:
+        mention_reply_probability = _validate_probability(
+            mention_reply_probability, 'mention reply probability')
+    random_delay_min = _validate_nonnegative(random_delay_min, 'random delay min')
+    random_delay_max = _validate_nonnegative(random_delay_max, 'random delay max')
+    if random_delay_max < random_delay_min:
+        raise TelegramCliError('random delay max must be greater than or equal to min.')
+    merge_window = _validate_nonnegative(merge_window, 'merge window')
+
     client = _client(config)
     await client.start()
     queue = asyncio.Queue()
@@ -250,13 +367,15 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
 
     try:
         me = await client.get_me()
+        me_names = _mention_names(me)
         entity, row = await resolve_chat(client, chat)
         safety.require_can_write(config, row['id'])
 
         output_func(
-            'Round started: {} (id={}) duration={}s max_replies={} min_reply_interval={}s end_buffer={}s.'.format(
+            'Round started: {} (id={}) duration={}s max_replies={} min_reply_interval={}s end_buffer={}s reply_probability={} random_delay={}-{}s merge_window={}s.'.format(
                 row['title'], row['id'], duration, max_replies,
-                min_reply_interval, end_buffer))
+                min_reply_interval, end_buffer, reply_probability,
+                random_delay_min, random_delay_max, merge_window))
         output_func('Profile: {}'.format(_format_profile_guidance(config.profile)))
         output_func('Type a reply to send, empty line to skip, /quit to stop.')
 
@@ -286,10 +405,38 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
             except asyncio.TimeoutError:
                 break
 
-            sender = await event.get_sender()
-            sender_name = utils.get_display_name(sender) if sender else str(event.sender_id)
-            text = event.message.message or ''
-            output_func('\nIncoming [{}] {}: {}'.format(event.message.id, sender_name, text))
+            events_batch = await _collect_merged_events(
+                queue, event, merge_window, end_at, loop)
+            incoming_lines = []
+            combined_text = []
+            for item_event in events_batch:
+                sender = await item_event.get_sender()
+                sender_name = (
+                    utils.get_display_name(sender)
+                    if sender else str(item_event.sender_id))
+                text = item_event.message.message or ''
+                incoming_lines.append((item_event.message.id, sender_name, text))
+                combined_text.append(text)
+
+            output_func('')
+            if len(incoming_lines) == 1:
+                msg_id, sender_name, text = incoming_lines[0]
+                output_func('Incoming [{}] {}: {}'.format(msg_id, sender_name, text))
+            else:
+                output_func('Incoming batch ({} messages):'.format(len(incoming_lines)))
+                for msg_id, sender_name, text in incoming_lines:
+                    output_func('- [{}] {}: {}'.format(msg_id, sender_name, text))
+
+            should_prompt, reason = _should_prompt_for_text(
+                '\n'.join(combined_text),
+                reply_probability=reply_probability,
+                mention_reply_probability=mention_reply_probability,
+                mentions_me=_mentions_me('\n'.join(combined_text), me_names),
+                skip_short_ack=skip_short_ack)
+            if not should_prompt:
+                output_func('Skipped: {}.'.format(reason))
+                continue
+
             if not quiet_context:
                 output_func('Recent context:')
                 for item in await _recent_context_lines(client, entity, limit):
@@ -341,6 +488,22 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 continue
 
             safety.require_text_allowed(config, reply)
+
+            random_delay = _random_reply_delay(random_delay_min, random_delay_max)
+            if random_delay > 0:
+                if safety.should_stop_for_end_buffer(
+                        loop.time() + random_delay, end_at, end_buffer):
+                    safety.audit_record(
+                        config, 'game_round_send', row['id'],
+                        chat_title=row['title'], text=reply,
+                        status='skipped_end_buffer')
+                    output_func(
+                        'Skipped: random delay would enter end_buffer={}s.'.format(
+                            end_buffer))
+                    continue
+                output_func('Human delay: waiting {:.1f}s before send.'.format(
+                    random_delay))
+                await asyncio.sleep(random_delay)
 
             sent = await client.send_message(entity, reply)
             last_sent_at = loop.time()

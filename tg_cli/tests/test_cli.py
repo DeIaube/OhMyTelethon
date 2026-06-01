@@ -65,6 +65,33 @@ def test_game_round_parser_defaults():
     assert args.limit == 12
     assert args.max_replies == 8
     assert args.include_self is False
+    assert args.reply_probability == 1.0
+    assert args.mention_reply_probability is None
+    assert args.random_delay_min == 0.0
+    assert args.random_delay_max == 0.0
+    assert args.skip_short_ack is False
+    assert args.merge_window == 0.0
+
+
+def test_game_round_parser_humanization_flags():
+    parser = cli.build_parser()
+
+    args = parser.parse_args([
+        'game', 'round', '5217114569',
+        '--reply-probability', '0.4',
+        '--mention-reply-probability', '0.9',
+        '--random-delay-min', '1.5',
+        '--random-delay-max', '4',
+        '--skip-short-ack',
+        '--merge-window', '2',
+    ])
+
+    assert args.reply_probability == 0.4
+    assert args.mention_reply_probability == 0.9
+    assert args.random_delay_min == 1.5
+    assert args.random_delay_max == 4.0
+    assert args.skip_short_ack is True
+    assert args.merge_window == 2.0
     assert args.quiet_context is False
     assert args.min_reply_interval == 2.0
     assert args.end_buffer == 5.0

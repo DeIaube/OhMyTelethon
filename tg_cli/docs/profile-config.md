@@ -18,6 +18,8 @@ Example:
 }
 ```
 
+For a local starter file without credentials, see `tg_cli/docs/local-profile-template.json`.
+
 ## Fields
 
 - `style`: Natural-language tone guidance for Codex.
@@ -63,3 +65,34 @@ tg-cli game round 5217114569 --duration 60 --max-replies 8 \
 - `--min-reply-interval`: Minimum seconds between successful round sends.
 - `--end-buffer`: Stop prompting, or skip a typed reply, if sending would happen too close to the round end.
 - `--quiet-context`: Suppress repeated recent-context output for a compact one-minute operator loop.
+
+## Human-Likeness Options
+
+These options keep `game round` semi-automatic. The CLI still does not generate replies; it only decides whether to prompt the Codex operator and when to send the operator's typed reply.
+
+```sh
+tg-cli game round 5217114569 --duration 120 --max-replies 10 \
+  --quiet-context \
+  --reply-probability 0.75 \
+  --mention-reply-probability 1 \
+  --random-delay-min 1 \
+  --random-delay-max 4 \
+  --skip-short-ack \
+  --merge-window 2
+```
+
+- `--reply-probability`: Probability from `0` to `1` that a normal inbound message will prompt for a reply.
+- `--mention-reply-probability`: Optional probability override when inbound text appears to mention the logged-in account by username or display name.
+- `--random-delay-min` / `--random-delay-max`: Random delay range before sending the operator's typed reply.
+- `--skip-short-ack`: Skip low-information messages such as `嗯`, `哈哈`, `真的假的`, and one-character acknowledgements.
+- `--merge-window`: Wait for additional inbound messages for this many seconds, then prompt once for the merged batch.
+
+Suggested first real-game settings:
+
+```sh
+tg-cli game round 5217114569 --duration 120 --max-replies 8 \
+  --quiet-context --min-reply-interval 5 --end-buffer 8 \
+  --reply-probability 0.7 --mention-reply-probability 1 \
+  --random-delay-min 1 --random-delay-max 4 \
+  --skip-short-ack --merge-window 2
+```
