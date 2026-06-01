@@ -4,8 +4,9 @@ import pytest
 
 from tg_cli.config import (
     DEFAULT_DAEMON, DEFAULT_INITIATIVE, DEFAULT_PERSONA, DEFAULT_PROFILE,
-    DEFAULT_REPLY_POLICY, DEFAULT_ROUND, ConfigError, load_config,
-    normalize_chat_id, normalize_daemon, normalize_round, parse_chat_ids,
+    DEFAULT_QUOTA, DEFAULT_REPLY_POLICY, DEFAULT_ROUND, ConfigError,
+    load_config, normalize_chat_id, normalize_daemon, normalize_quota,
+    normalize_round, parse_chat_ids,
 )
 
 
@@ -69,6 +70,9 @@ def test_load_config_supplies_profile_defaults_when_omitted(tmp_path):
         tmp_path / 'tg_cli' / '.tg-cli-daemon.lock').resolve()
     assert config.daemon['status_path'] == (
         tmp_path / 'tg_cli' / '.tg-cli-daemon-status.json').resolve()
+    assert config.quota['state_path'] == (
+        tmp_path / 'tg_cli' / '.tg-cli-quota-state.json').resolve()
+    assert DEFAULT_QUOTA['state_path'] is None
     assert config.reply_policy == DEFAULT_REPLY_POLICY
     assert config.initiative == DEFAULT_INITIATIVE
     assert config.persona == DEFAULT_PERSONA
@@ -91,9 +95,15 @@ def test_load_config_merges_social_policy_defaults_with_file_values(tmp_path):
             'idle_after': '10',
             'cooldown': 3,
             'max_starts': '2',
+            'min_starts': '1',
+            'min_start_after': '20',
             'avoid_when_active': False,
             'recent_window': '120',
             'topic_sources': 'recent_messages',
+            'allow_topic_shift': True,
+            'topic_shift_when': 'unsafe context',
+            'topic_shift_style': 'casual pivot',
+            'fallback_topics': 'games tonight',
         },
         'persona': {
             'identity': 'regular chat member',
@@ -116,9 +126,15 @@ def test_load_config_merges_social_policy_defaults_with_file_values(tmp_path):
     assert config.initiative['idle_after'] == 10.0
     assert config.initiative['cooldown'] == 3.0
     assert config.initiative['max_starts'] == 2
+    assert config.initiative['min_starts'] == 1
+    assert config.initiative['min_start_after'] == 20.0
     assert config.initiative['avoid_when_active'] is False
     assert config.initiative['recent_window'] == 120.0
     assert config.initiative['topic_sources'] == ['recent_messages']
+    assert config.initiative['allow_topic_shift'] is True
+    assert config.initiative['topic_shift_when'] == ['unsafe context']
+    assert config.initiative['topic_shift_style'] == 'casual pivot'
+    assert config.initiative['fallback_topics'] == ['games tonight']
     assert config.persona['identity'] == 'regular chat member'
     assert config.persona['traits'] == ['dry humor']
     assert config.persona['catchphrases'] == ['行吧']
@@ -206,6 +222,20 @@ def test_load_config_merges_daemon_defaults_with_file_values(tmp_path):
     assert config.daemon['stale_lock_after'] == 30.0
 
 
+def test_load_config_merges_quota_defaults_with_file_values(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'quota': {
+            'state_path': 'quota-state.json',
+        },
+    }), encoding='utf-8')
+
+    config = load_config(config_path, env={}, cwd=tmp_path)
+
+    assert config.quota['state_path'] == (
+        tmp_path / 'quota-state.json').resolve()
+
+
 def test_load_config_presets_resolve_over_global_profile_and_round(tmp_path):
     config_path = tmp_path / '.tg-cli.json'
     config_path.write_text(json.dumps({
@@ -271,8 +301,17 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
             'identity': 'global identity',
             'traits': ['global trait'],
         },
+        'daemon': {
+            'min_reply_interval': 6,
+            'max_messages_per_hour': 20,
+        },
         'presets': {
             'social': {
+                'daemon': {
+                    'min_reply_interval': 2,
+                    'max_messages_per_hour': 240,
+                    'max_consecutive_replies': 4,
+                },
                 'reply_policy': {
                     'reply_threshold': 0.9,
                     'skip_when': 'heated argument',
@@ -283,6 +322,10 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
                     'avoid_when_active': False,
                     'recent_window': 90,
                     'topics': 'music',
+                    'allow_topic_shift': True,
+                    'topic_shift_when': 'unsafe',
+                    'topic_shift_style': 'change subject',
+                    'fallback_topics': 'movies',
                 },
                 'persona': {
                     'traits': ['witty'],
@@ -296,7 +339,13 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
     reply_policy = config.resolve_reply_policy('social')
     initiative = config.resolve_initiative('social')
     persona = config.resolve_persona('social')
+    daemon = config.resolve_daemon('social')
 
+    assert config.presets['social']['daemon'] == {
+        'min_reply_interval': 2.0,
+        'max_messages_per_hour': 240,
+        'max_consecutive_replies': 4,
+    }
     assert config.presets['social']['reply_policy'] == {
         'reply_threshold': 0.9,
         'skip_when': ['heated argument'],
@@ -307,6 +356,10 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
         'avoid_when_active': False,
         'recent_window': 90.0,
         'topics': ['music'],
+        'allow_topic_shift': True,
+        'topic_shift_when': ['unsafe'],
+        'topic_shift_style': 'change subject',
+        'fallback_topics': ['movies'],
     }
     assert config.presets['social']['persona'] == {
         'traits': ['witty'],
@@ -321,9 +374,18 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
     assert initiative['avoid_when_active'] is False
     assert initiative['recent_window'] == 90.0
     assert initiative['topics'] == ['music']
+    assert initiative['allow_topic_shift'] is True
+    assert initiative['topic_shift_when'] == ['unsafe']
+    assert initiative['topic_shift_style'] == 'change subject'
+    assert initiative['fallback_topics'] == ['movies']
     assert persona['identity'] == 'global identity'
     assert persona['traits'] == ['witty']
     assert persona['avoid'] == ['lecturing']
+    assert daemon['min_reply_interval'] == 2.0
+    assert daemon['max_messages_per_hour'] == 240
+    assert daemon['max_consecutive_replies'] == 4
+    assert config.resolve_daemon(None)['min_reply_interval'] == 6.0
+    assert config.resolve_daemon(None)['max_messages_per_hour'] == 20
 
 
 def test_resolve_unknown_preset_raises_clear_error(tmp_path):
@@ -404,6 +466,24 @@ def test_load_config_rejects_invalid_social_policy_shapes(tmp_path):
     with pytest.raises(ConfigError, match='presets.social.initiative'):
         load_config(config_path, env={}, cwd=tmp_path)
 
+    config_path.write_text(json.dumps({
+        'presets': {
+            'social': {'daemon': 'not-object'},
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='presets.social.daemon'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+    config_path.write_text(json.dumps({
+        'presets': {
+            'social': {'daemon': {'queue_path': 'other.json'}},
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='presets.social.daemon.queue_path'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
 
 def test_load_config_rejects_invalid_social_policy_values_with_paths(tmp_path):
     config_path = tmp_path / '.tg-cli.json'
@@ -420,6 +500,24 @@ def test_load_config_rejects_invalid_social_policy_values_with_paths(tmp_path):
     with pytest.raises(
             ConfigError,
             match='presets.social.initiative.idle_after'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+    config_path.write_text(json.dumps({
+        'initiative': {
+            'min_starts': -1,
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='initiative.min_starts'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+    config_path.write_text(json.dumps({
+        'initiative': {
+            'min_start_after': -1,
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='initiative.min_start_after'):
         load_config(config_path, env={}, cwd=tmp_path)
 
     config_path.write_text(json.dumps({
@@ -453,3 +551,10 @@ def test_normalize_daemon_rejects_invalid_values():
         normalize_daemon({'poll_interval': -1})
     with pytest.raises(ConfigError, match='daemon.queue_path'):
         normalize_daemon({'queue_path': 123})
+
+
+def test_normalize_quota_rejects_invalid_values():
+    with pytest.raises(ConfigError, match='quota must contain a JSON object'):
+        normalize_quota(['not-object'])
+    with pytest.raises(ConfigError, match='quota.state_path'):
+        normalize_quota({'state_path': 123})

@@ -325,10 +325,12 @@ def get_task(path, task_id):
     return None
 
 
-def complete_task(path, task_id, message_id=None, dry_run=False):
+def complete_task(path, task_id, message_id=None, message_ids=None, dry_run=False):
     fields = {
         'dry_run': bool(dry_run),
     }
+    if message_ids is not None:
+        fields['message_ids'] = [int(item) for item in message_ids]
     if message_id is not None:
         fields['message_id'] = message_id
     return _update_task(

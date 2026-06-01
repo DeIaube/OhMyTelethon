@@ -16,6 +16,7 @@
 .tg-cli-daemon-queue.json.lock
 .tg-cli-daemon-status.json
 .tg-cli-daemon.lock
+.tg-cli-quota-state.json
 tg-cli.audit.log
 
 # Builds and testing

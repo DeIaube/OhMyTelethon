@@ -2,6 +2,8 @@ import asyncio
 import copy
 import collections
 import datetime as _dt
+import importlib
+import inspect
 import json
 import os
 import random
@@ -18,6 +20,9 @@ from . import safety
 
 class TelegramCliError(RuntimeError):
     pass
+
+
+quota_store = None
 
 
 def _client(config):
@@ -257,6 +262,9 @@ def _context_guidance(profile, reply_policy, initiative, recent_questions):
     if initiative and initiative.get('enabled'):
         guidance.append(
             'Initiative is enabled but remains bounded by idle/cooldown/risk guidance.')
+        if initiative.get('allow_topic_shift'):
+            guidance.append(
+                'When the latest context is unsafe or unjoinable, initiative may start a neutral fallback topic instead of replying to it.')
     if recent_questions:
         guidance.append('Recent questions may be the best entry point if still relevant.')
     return guidance
@@ -393,10 +401,22 @@ def _format_initiative_guidance(initiative):
         'idle_after={}'.format(initiative.get('idle_after')),
         'cooldown={}'.format(initiative.get('cooldown')),
         'max_starts={}'.format(initiative.get('max_starts')),
+        'min_starts={}'.format(initiative.get('min_starts')),
+        'min_start_after={}'.format(initiative.get('min_start_after')),
         'avoid_when_active={}'.format(bool(initiative.get('avoid_when_active', True))),
         'active_threshold={}'.format(initiative.get('active_threshold')),
         'recent_window={}'.format(initiative.get('recent_window')),
+        'allow_topic_shift={}'.format(bool(initiative.get('allow_topic_shift'))),
     ]
+    if initiative.get('topic_shift_when'):
+        parts.append('topic_shift_when={}'.format(
+            _format_named_list(initiative.get('topic_shift_when'))))
+    if initiative.get('topic_shift_style'):
+        parts.append('topic_shift_style={}'.format(
+            initiative.get('topic_shift_style')))
+    if initiative.get('fallback_topics'):
+        parts.append('fallback_topics={}'.format(
+            _format_named_list(initiative.get('fallback_topics'))))
     if initiative.get('topics'):
         parts.append('topics={}'.format(_format_named_list(initiative.get('topics'))))
     if initiative.get('allowed_intents'):
@@ -408,10 +428,51 @@ def _format_initiative_guidance(initiative):
     return '; '.join(parts)
 
 
+def _initiative_required_starts(initiative, max_starts):
+    if not initiative:
+        return 0
+    required = int(initiative.get('min_starts') or 0)
+    return min(required, int(max_starts or 0))
+
+
+def _initiative_wait_seconds(
+        initiative, now, started_at, last_activity_at,
+        last_initiative_at, initiative_starts):
+    if not initiative or not initiative.get('enabled'):
+        return None
+    max_starts = int(initiative.get('max_starts') or 0)
+    if initiative_starts >= max_starts:
+        return None
+
+    idle_after = float(initiative.get('idle_after') or 0.0)
+    cooldown = float(initiative.get('cooldown') or 0.0)
+    min_starts = _initiative_required_starts(initiative, max_starts)
+    if initiative_starts < min_starts:
+        min_start_after = initiative.get('min_start_after')
+        if min_start_after is None:
+            min_start_after = idle_after
+        due_at = started_at + float(min_start_after)
+    else:
+        due_at = last_activity_at + idle_after
+    if last_initiative_at is not None:
+        due_at = max(due_at, last_initiative_at + cooldown)
+    return max(0.0, due_at - now)
+
+
+def _initiative_allows_active_bypass(initiative, initiative_starts):
+    if not initiative:
+        return False
+    max_starts = int(initiative.get('max_starts') or 0)
+    return initiative_starts < _initiative_required_starts(
+        initiative, max_starts)
+
+
 def _round_instruction(profile, persona=None, reply_policy=None):
     return (
         'Agent instruction: decide whether a normal person would reply. '
-        'If not, use empty input to skip. Reply with one short chat message only. '
+        'If not, use empty input to skip. Reply with one natural chat reply. '
+        'Keep it short. If splitting is enabled, split only naturally separate thoughts; '
+        'never pad for message count. '
         '{}. {}. {}. Do not explain your decision. Use /quit to stop.'
     ).format(
         _format_profile_guidance(profile),
@@ -426,14 +487,28 @@ def _initiative_instruction(profile, persona, reply_policy, initiative,
     for item in recent_messages[-6:]:
         recent_lines.append('[{id}] {sender}: {text}'.format(**item))
     recent_context = '\n'.join(recent_lines) if recent_lines else 'none'
+    if initiative and initiative.get('allow_topic_shift'):
+        topic_shift_rule = (
+            'Prefer continuing a concrete harmless recent topic. '
+            'If recent context is unsafe, spammy, grey-area, unclear, or has no safe opening, do not engage that topic; '
+            'start one neutral fallback topic from fallback_topics as a casual subject change. '
+            'Do not explain the subject change or mention the unsafe context. '
+            'Skip only when even a fallback topic would feel disruptive.'
+        )
+    else:
+        topic_shift_rule = (
+            'Prefer continuing a concrete harmless recent topic. '
+            'If none exists, skip instead of forcing a reply.'
+        )
     return (
         'Agent initiative opportunity:\n'
         'The group has been idle for {idle:.1f}s. preset={preset}.\n'
         '{profile}.\n{persona}.\n{reply_policy}.\n{initiative}.\n'
         'Recent context:\n{recent}\n'
-        'Prefer continuing a harmless recent topic. If none exists, you may start one light, short, open-ended topic. '
+        '{topic_shift_rule} '
+        'Split replies only when each part adds real content; never pad, repeat yourself, or comment on chat speed just to be active. '
         'Do not mention AI/Codex/Claude/operator identity. Do not advertise, moderate, summarize the group, ask private questions, or join risky topics. '
-        'Output one message to send, or empty input to skip.'
+        'Output one natural reply to send, or empty input to skip.'
     ).format(
         idle=float(idle_seconds),
         preset=preset or 'default',
@@ -441,7 +516,8 @@ def _initiative_instruction(profile, persona, reply_policy, initiative,
         persona=_format_persona_guidance(persona),
         reply_policy=_format_reply_policy_guidance(reply_policy),
         initiative=_format_initiative_guidance(initiative),
-        recent=recent_context)
+        recent=recent_context,
+        topic_shift_rule=topic_shift_rule)
 
 
 class RoundReport:
@@ -727,6 +803,10 @@ def _round_reply_parts(config, reply):
         max_chars=round_config.get('split_max_chars', 28),
         max_parts=round_config.get('split_max_parts', 3),
     )
+
+
+def _daemon_reply_parts(config, reply):
+    return _round_reply_parts(config, reply)
 
 
 def _remaining_message_budget(report, max_replies):
@@ -1158,40 +1238,44 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
             return sent_ids
 
         def initiative_wait_seconds(now):
-            if not initiative or not initiative.get('enabled'):
-                return None
-            max_starts = int(initiative.get('max_starts') or 0)
-            if initiative_starts >= max_starts:
-                return None
-            idle_after = float(initiative.get('idle_after') or 0.0)
-            cooldown = float(initiative.get('cooldown') or 0.0)
-            due_at = last_activity_at + idle_after
-            if last_initiative_at is not None:
-                due_at = max(due_at, last_initiative_at + cooldown)
-            return max(0.0, due_at - now)
+            return _initiative_wait_seconds(
+                initiative, now, round_started_at, last_activity_at,
+                last_initiative_at, initiative_starts)
 
         async def run_initiative_prompt(now):
             nonlocal initiative_starts, last_initiative_at, last_activity_at
+            if safety.should_stop_for_end_buffer(now, end_at, end_buffer):
+                report.record_initiative_skip('end_buffer')
+                return False
             recent_window = float(initiative.get('recent_window') or 300.0)
             active_threshold = int(initiative.get('active_threshold') or 0)
             recent_count = len([
                 item for item in recent_event_times
                 if item >= now - recent_window])
-            if initiative.get('avoid_when_active', True) and active_threshold > 0:
+            bypass_active_gate = _initiative_allows_active_bypass(
+                initiative, initiative_starts)
+            if (initiative.get('avoid_when_active', True)
+                    and active_threshold > 0 and not bypass_active_gate):
                 if recent_count >= active_threshold:
                     report.record_initiative_skip('active_chat')
                     last_initiative_at = now
                     return False
 
             initiative_starts += 1
-            last_initiative_at = now
             report.record_initiative_prompt()
             recent_context = await _recent_context_lines(
                 client, entity, min(limit, 8))
+            current_now = loop.time()
+            if safety.should_stop_for_end_buffer(current_now, end_at, end_buffer):
+                emit('Skipped initiative: remaining time is below end_buffer={}s.'.format(
+                    end_buffer))
+                report.record_initiative_skip('end_buffer')
+                return False
+            last_initiative_at = current_now
             emit('')
             emit(_initiative_instruction(
                 profile, persona, reply_policy, initiative,
-                preset=preset_name, idle_seconds=now - last_activity_at,
+                preset=preset_name, idle_seconds=current_now - last_activity_at,
                 recent_messages=recent_context))
             safety.require_can_write(config, row['id'])
             reply = input_func(
@@ -1309,8 +1393,18 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
         await client.disconnect()
 
 
-def _daemon_task_prompt(profile, persona, reply_policy):
-    return _round_instruction(profile, persona, reply_policy)
+def _daemon_task_prompt(profile, persona, reply_policy, round_config=None):
+    prompt = _round_instruction(profile, persona, reply_policy)
+    round_config = round_config or {}
+    if round_config.get('split_long_replies'):
+        prompt += (
+            ' The running daemon may split longer replies into up to {} short '
+            'messages around {} chars each. Use this only for naturally separate '
+            'thoughts; never pad, repeat filler, or chase message count.'
+        ).format(
+            int(round_config.get('split_max_parts') or 3),
+            int(round_config.get('split_max_chars') or 28))
+    return prompt
 
 
 def _task_config(base_config, task):
@@ -1351,10 +1445,11 @@ def _daemon_reply_counts(queue_path, chat_id, now=None):
         if status in ('reply_pending', 'held_rate_limit'):
             continue
         if status == 'completed' and task.get('message_id') is not None:
+            count = len(task.get('message_ids') or []) or 1
             if (now - updated_at).total_seconds() <= 3600:
-                hourly += 1
+                hourly += count
             if counting_consecutive:
-                consecutive += 1
+                consecutive += count
             continue
         counting_consecutive = False
     return hourly, consecutive
@@ -1363,6 +1458,333 @@ def _daemon_reply_counts(queue_path, chat_id, now=None):
 def _daemon_retry_after(seconds, now=None):
     now = now or _dt.datetime.now(_dt.timezone.utc)
     return now + _dt.timedelta(seconds=max(0.0, float(seconds or 0.0)))
+
+
+def _quota_module():
+    if quota_store is not None:
+        return quota_store
+    try:
+        return importlib.import_module('tg_cli.quota')
+    except ImportError as exc:
+        raise TelegramCliError('Quota state module is unavailable.') from exc
+
+
+def _quota_state_path(config):
+    quota_config = getattr(config, 'quota', {}) or {}
+    state_path = None
+    if isinstance(quota_config, dict):
+        state_path = quota_config.get('state_path')
+    if state_path is None:
+        state_path = getattr(config, 'quota_state_path', None)
+    if state_path is None:
+        raise TelegramCliError('Missing quota.state_path in config.')
+    return state_path
+
+
+def _quota_invoke(config, func, *args, **kwargs):
+    state_path = _quota_state_path(config)
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return func(state_path, *args, **kwargs)
+
+    positional = [
+        param for param in signature.parameters.values()
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if not positional:
+        return func(*args, **kwargs)
+
+    first_name = positional[0].name
+    if first_name in ('config', 'app_config'):
+        return func(config, *args, **kwargs)
+    if first_name in ('chat_id', 'task_id', 'message_ids'):
+        return func(*args, **kwargs)
+    return func(state_path, *args, **kwargs)
+
+
+def _quota_status(config):
+    store = _quota_module()
+    status_func = getattr(store, 'get_status', None) or getattr(store, 'status', None)
+    if status_func is None:
+        raise TelegramCliError('Quota module does not expose status/get_status.')
+    return _quota_invoke(config, status_func)
+
+
+def _quota_next_target(config):
+    store = _quota_module()
+    next_target = getattr(store, 'next_target', None)
+    if next_target is None:
+        raise TelegramCliError('Quota module does not expose next_target.')
+    return _quota_invoke(config, next_target)
+
+
+def _quota_create_task(config, chat_id, context):
+    store = _quota_module()
+    create_task = getattr(store, 'create_task', None)
+    if create_task is None:
+        raise TelegramCliError('Quota module does not expose create_task.')
+    return _quota_invoke(config, create_task, int(chat_id), context=context)
+
+
+def _quota_get_task(config, task_id):
+    store = _quota_module()
+    get_task = getattr(store, 'get_task', None)
+    if get_task is None:
+        raise TelegramCliError('Quota module does not expose get_task.')
+    return _quota_invoke(config, get_task, task_id)
+
+
+def _quota_complete_task(config, task_id, message_ids, dry_run=False):
+    store = _quota_module()
+    complete_task = getattr(store, 'complete_task', None)
+    if complete_task is None:
+        raise TelegramCliError('Quota module does not expose complete_task.')
+    return _quota_invoke(
+        config, complete_task, task_id, list(message_ids),
+        dry_run=bool(dry_run))
+
+
+def _quota_run_status(status):
+    if not status:
+        return ''
+    return str(status.get('status') or '').strip().lower()
+
+
+def _quota_target_chat_id(target):
+    if not target:
+        return None
+    if target.get('chat_id') is not None:
+        return int(target.get('chat_id'))
+    chat = target.get('chat') or {}
+    if chat.get('id') is not None:
+        return int(chat.get('id'))
+    return None
+
+
+def _quota_target_remaining(target):
+    if not target:
+        return 0
+    target_count = int(target.get('target_count') or target.get('target') or 0)
+    sent_count = int(target.get('sent_count') or target.get('sent') or 0)
+    return max(0, target_count - sent_count)
+
+
+def _quota_find_target(status, chat_id):
+    wanted = int(chat_id)
+    for target in (status or {}).get('targets') or []:
+        if _quota_target_chat_id(target) == wanted:
+            return target
+    return None
+
+
+def _quota_task_chat(task):
+    task = task or {}
+    chat = task.get('chat')
+    if isinstance(chat, dict) and chat.get('id') is not None:
+        return chat
+    context = task.get('context') or {}
+    chat = context.get('chat')
+    if isinstance(chat, dict) and chat.get('id') is not None:
+        return chat
+    chat_id = task.get('chat_id')
+    if chat_id is None:
+        quota = context.get('quota') or {}
+        target = quota.get('target') or {}
+        chat_id = _quota_target_chat_id(target)
+    if chat_id is None:
+        return {}
+    return {'id': int(chat_id), 'title': str(chat_id)}
+
+
+def _quota_assert_run_active(status):
+    run_status = _quota_run_status(status)
+    if run_status in ('stopped', 'done', 'completed'):
+        raise TelegramCliError('Quota run is {}; cannot send.'.format(run_status))
+    if run_status and run_status != 'active':
+        raise TelegramCliError('Quota run is {}; cannot send.'.format(run_status))
+    if not status:
+        raise TelegramCliError('No quota run found.')
+
+
+def _quota_assert_target_active(target, chat_id):
+    if not target:
+        raise TelegramCliError(
+            'Quota target not found for chat {}.'.format(chat_id))
+    target_status = str(target.get('status') or 'active').strip().lower()
+    if target_status in ('stopped', 'done', 'completed'):
+        raise TelegramCliError(
+            'Quota target for chat {} is {}; cannot send.'.format(
+                chat_id, target_status))
+    if _quota_target_remaining(target) <= 0:
+        raise TelegramCliError(
+            'Quota target for chat {} is already complete.'.format(chat_id))
+
+
+def _quota_assert_task_sendable(task, task_id):
+    if not task:
+        raise TelegramCliError('Quota task not found: {}'.format(task_id))
+    task_status = str(task.get('status') or 'pending').strip().lower()
+    if task_status in ('stopped', 'done', 'completed', 'skipped'):
+        raise TelegramCliError(
+            'Quota task {} is {}; cannot send.'.format(task_id, task_status))
+
+
+def _quota_task_config(base_config, task):
+    return _task_config(base_config, task or {})
+
+
+def _quota_preset_name(config, status=None):
+    return (
+        getattr(config, 'preset_name', None)
+        or (status or {}).get('preset')
+        or None)
+
+
+async def quota_next_context(config, limit=12, operator='agent'):
+    config.require_credentials()
+    limit = int(limit)
+    if limit < 1:
+        raise TelegramCliError('limit must be greater than 0.')
+
+    status = _quota_status(config)
+    _quota_assert_run_active(status)
+    target = _quota_next_target(config)
+    if target is None:
+        return {'task': None, 'context': None, 'status': _quota_status(config)}
+
+    chat_id = _quota_target_chat_id(target)
+    if chat_id is None:
+        raise TelegramCliError('Quota target is missing chat_id.')
+    _quota_assert_target_active(target, chat_id)
+
+    preset = _quota_preset_name(config, status)
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat_id)
+        safety.require_allowed_chat(config, row['id'])
+        messages = await _recent_context_lines(client, entity, limit)
+
+    context = summarize_group_context(
+        config, row, messages, operator=operator, preset=preset,
+        tail_limit=limit)
+    task_context = {
+        'chat': copy.deepcopy(row),
+        'operator': context['operator'],
+        'preset': context['preset'],
+        'profile': copy.deepcopy(context['profile']),
+        'persona': copy.deepcopy(context['persona']),
+        'reply_policy': copy.deepcopy(context['reply_policy']),
+        'initiative': copy.deepcopy(context['initiative']),
+        'prompt': _daemon_task_prompt(
+            context['profile'], context['persona'],
+            context['reply_policy'], getattr(config, 'round', {}) or {}),
+        'messages': copy.deepcopy(context['messages_tail']),
+        'context_summary': _task_context_summary(context),
+        'quota': {
+            'run_id': status.get('run_id'),
+            'target': copy.deepcopy(target),
+            'remaining': _quota_target_remaining(target),
+        },
+    }
+    task = _quota_create_task(config, row['id'], task_context)
+    return {
+        'task': task,
+        'context': task_context,
+        'status': _quota_status(config),
+    }
+
+
+async def quota_reply(config, task_id, text, dry_run=False):
+    config.require_credentials()
+    reply = (text or '').strip()
+    if not reply:
+        raise TelegramCliError('Reply text must not be empty.')
+
+    status = _quota_status(config)
+    _quota_assert_run_active(status)
+    task = _quota_get_task(config, task_id)
+    _quota_assert_task_sendable(task, task_id)
+    task_config = _quota_task_config(config, task)
+    chat = _quota_task_chat(task)
+    chat_id = chat.get('id')
+    if chat_id is None:
+        raise TelegramCliError('Quota task {} is missing chat id.'.format(task_id))
+    target = _quota_find_target(status, chat_id)
+    _quota_assert_target_active(target, chat_id)
+
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat_id)
+        target = _quota_find_target(_quota_status(config), row['id'])
+        _quota_assert_target_active(target, row['id'])
+        current_task = _quota_get_task(config, task_id)
+        _quota_assert_task_sendable(current_task, task_id)
+        task_config = _quota_task_config(config, current_task)
+
+        safety.require_can_write(task_config, row['id'])
+        matches = safety.find_forbidden_terms(task_config, reply)
+        if matches:
+            safety.audit_record(
+                task_config, 'quota_reply_send', row['id'],
+                chat_title=row['title'], text=reply, dry_run=dry_run,
+                status='blocked_forbidden_terms')
+            raise safety.SafetyError(
+                'Message contains forbidden/sensitive profile term(s): {}.'.format(
+                    ', '.join(matches)))
+
+        reply_parts = _round_reply_parts(task_config, reply)
+        if not reply_parts:
+            raise TelegramCliError('Reply text must not be empty.')
+        for part in reply_parts:
+            safety.require_text_allowed(task_config, part)
+
+        remaining = _quota_target_remaining(target)
+        if len(reply_parts) > remaining:
+            raise TelegramCliError(
+                'Quota reply would exceed remaining target for chat {}: '
+                '{} part(s) for {} remaining.'.format(
+                    row['id'], len(reply_parts), remaining))
+
+        if dry_run:
+            safety.audit_record(
+                task_config, 'quota_reply_send', row['id'],
+                chat_title=row['title'], text=reply, dry_run=True,
+                status='dry_run')
+            return {
+                'sent': False,
+                'dry_run': True,
+                'task_id': task_id,
+                'chat': row,
+                'message_ids': [],
+                'parts': reply_parts,
+            }
+
+        sent_ids = []
+        try:
+            for part in reply_parts:
+                sent = await client.send_message(entity, part)
+                sent_ids.append(sent.id)
+                safety.audit_record(
+                    task_config, 'quota_reply_send', row['id'],
+                    chat_title=row['title'], text=part, message_id=sent.id,
+                    status='sent')
+        except Exception:
+            if sent_ids:
+                _quota_complete_task(
+                    config, task_id, sent_ids, dry_run=False)
+            raise
+
+    completed = _quota_complete_task(config, task_id, sent_ids, dry_run=False)
+    return {
+        'sent': True,
+        'dry_run': False,
+        'task_id': task_id,
+        'chat': row,
+        'message_ids': sent_ids,
+        'parts': reply_parts,
+        'task': completed,
+    }
 
 
 async def _daemon_send_reply_task(client, entity, config, row, task,
@@ -1388,13 +1810,6 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
         emit('Skipped queued reply {}: forbidden terms.'.format(task['id']))
         return last_sent_at
 
-    now = asyncio.get_running_loop().time()
-    delay = safety.reply_interval_delay(
-        now, last_sent_at, config.daemon['min_reply_interval'])
-    if delay > 0:
-        emit('Daemon rate limit: waiting {:.1f}s before send.'.format(delay))
-        await asyncio.sleep(delay)
-
     if daemon_store.stop_requested(status_path):
         emit('Queued reply {} held: stop requested.'.format(task['id']))
         return last_sent_at
@@ -1419,8 +1834,15 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
         emit('Skipped queued reply {}: forbidden terms.'.format(task['id']))
         return last_sent_at
 
+    reply_parts = _daemon_reply_parts(task_config, reply)
+    if not reply_parts:
+        daemon_store.skip_task(queue_path, task['id'], reason='empty_reply_parts')
+        return last_sent_at
+    for part in reply_parts:
+        safety.require_text_allowed(task_config, part)
+
     hourly, consecutive = _daemon_reply_counts(queue_path, row['id'])
-    if hourly >= int(config.daemon['max_messages_per_hour']):
+    if hourly + len(reply_parts) > int(config.daemon['max_messages_per_hour']):
         retry_after = _daemon_retry_after(60.0)
         daemon_store.hold_rate_limited_task(
             queue_path, task['id'], reason='hourly_limit',
@@ -1428,7 +1850,7 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
         emit('Queued reply {} held: hourly daemon limit reached.'.format(
             task['id']))
         return last_sent_at
-    if consecutive >= int(config.daemon['max_consecutive_replies']):
+    if consecutive + len(reply_parts) > int(config.daemon['max_consecutive_replies']):
         retry_after = _daemon_retry_after(
             max(1.0, float(config.daemon['min_reply_interval'])))
         daemon_store.hold_rate_limited_task(
@@ -1447,16 +1869,44 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
         emit('DRY-RUN queued reply task={}'.format(task['id']))
         return last_sent_at
 
-    sent = await client.send_message(entity, reply)
-    last_sent_at = asyncio.get_running_loop().time()
-    safety.audit_record(
-        task_config, 'daemon_reply_send', row['id'],
-        chat_title=row['title'], text=reply, message_id=sent.id,
-        status='sent')
+    sent_ids = []
+    for index, part in enumerate(reply_parts):
+        if index > 0:
+            split_delay = _random_reply_delay(
+                task_config.round.get('split_delay_min', 1.0),
+                task_config.round.get('split_delay_max', 2.5))
+            if split_delay > 0:
+                emit('Daemon split delay: waiting {:.1f}s.'.format(split_delay))
+                await asyncio.sleep(split_delay)
+        now = asyncio.get_running_loop().time()
+        delay = safety.reply_interval_delay(
+            now, last_sent_at, config.daemon['min_reply_interval'])
+        if delay > 0:
+            emit('Daemon rate limit: waiting {:.1f}s before send.'.format(delay))
+            await asyncio.sleep(delay)
+        if daemon_store.stop_requested(status_path):
+            if sent_ids:
+                daemon_store.complete_task(
+                    queue_path, task['id'], message_id=sent_ids[0],
+                    message_ids=sent_ids, dry_run=False)
+                emit('SENT queued reply task={} message_ids={} partial_stop=true'.format(
+                    task['id'], ','.join(str(item) for item in sent_ids)))
+                return last_sent_at
+            emit('Queued reply {} held: stop requested.'.format(task['id']))
+            return last_sent_at
+        sent = await client.send_message(entity, part)
+        last_sent_at = asyncio.get_running_loop().time()
+        sent_ids.append(sent.id)
+        safety.audit_record(
+            task_config, 'daemon_reply_send', row['id'],
+            chat_title=row['title'], text=part, message_id=sent.id,
+            status='sent')
+
     daemon_store.complete_task(
-        queue_path, task['id'], message_id=sent.id, dry_run=False)
-    emit('SENT queued reply task={} message_id={}'.format(
-        task['id'], sent.id))
+        queue_path, task['id'], message_id=sent_ids[0],
+        message_ids=sent_ids, dry_run=False)
+    emit('SENT queued reply task={} message_ids={}'.format(
+        task['id'], ','.join(str(item) for item in sent_ids)))
     return last_sent_at
 
 
@@ -1564,38 +2014,39 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
             return appended
 
         def initiative_due(now):
-            if not initiative or not initiative.get('enabled'):
-                return None
-            if initiative_starts >= int(initiative.get('max_starts') or 0):
-                return None
-            due_at = last_activity_at + float(initiative.get('idle_after') or 0.0)
-            if last_initiative_at is not None:
-                due_at = max(
-                    due_at,
-                    last_initiative_at + float(initiative.get('cooldown') or 0.0))
-            return max(0.0, due_at - now)
+            return _initiative_wait_seconds(
+                initiative, now, started_at, last_activity_at,
+                last_initiative_at, initiative_starts)
 
         async def maybe_queue_initiative(now):
             nonlocal initiative_starts, last_initiative_at
+            if now >= end_at or daemon_store.stop_requested(status_path):
+                return
             recent_window = float(initiative.get('recent_window') or 300.0)
             active_threshold = int(initiative.get('active_threshold') or 0)
             recent_count = len([
                 item for item in recent_event_times
                 if item >= now - recent_window])
-            if initiative.get('avoid_when_active', True) and active_threshold > 0:
+            bypass_active_gate = _initiative_allows_active_bypass(
+                initiative, initiative_starts)
+            if (initiative.get('avoid_when_active', True)
+                    and active_threshold > 0 and not bypass_active_gate):
                 if recent_count >= active_threshold:
                     last_initiative_at = now
                     return
             recent_context = await _recent_context_lines(
                 client, entity, min(round_config.get('limit', 12),
                                     daemon_config['max_task_context']))
+            current_now = loop.time()
+            if current_now >= end_at or daemon_store.stop_requested(status_path):
+                return
             prompt = _initiative_instruction(
                 profile, persona, reply_policy, initiative,
-                preset=preset, idle_seconds=now - last_activity_at,
+                preset=preset, idle_seconds=current_now - last_activity_at,
                 recent_messages=recent_context)
-            initiative_starts += 1
-            last_initiative_at = now
-            await append_context_task('initiative', prompt, recent_context)
+            last_initiative_at = current_now
+            if await append_context_task('initiative', prompt, recent_context):
+                initiative_starts += 1
 
         while True:
             now = loop.time()
@@ -1631,7 +2082,10 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
 
             events_batch = await _collect_merged_events(
                 queue, event, round_config.get('merge_window', 0.0), end_at, loop)
-            last_activity_at = loop.time()
+            current_now = loop.time()
+            if current_now >= end_at:
+                break
+            last_activity_at = current_now
             recent_event_times.extend([last_activity_at] * len(events_batch))
             combined_text = []
             incoming_lines = []
@@ -1659,7 +2113,8 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
             recent_context = await _recent_context_lines(
                 client, entity, min(round_config.get('limit', 12),
                                     daemon_config['max_task_context']))
-            prompt = _daemon_task_prompt(profile, persona, reply_policy)
+            prompt = _daemon_task_prompt(
+                profile, persona, reply_policy, round_config)
             await append_context_task('message', prompt, recent_context)
             update_status(row=row, running=True)
 

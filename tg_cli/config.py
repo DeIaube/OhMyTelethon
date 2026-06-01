@@ -55,6 +55,11 @@ DEFAULT_DAEMON = {
 }
 
 
+DEFAULT_QUOTA = {
+    'state_path': None,
+}
+
+
 DEFAULT_REPLY_POLICY = {
     'group_type': 'group',
     'reply_threshold': 0.6,
@@ -86,11 +91,17 @@ DEFAULT_INITIATIVE = {
     'idle_after': 300.0,
     'cooldown': 600.0,
     'max_starts': 1,
+    'min_starts': 0,
+    'min_start_after': 60.0,
     'avoid_when_active': True,
     'active_threshold': 3,
     'recent_window': 300.0,
     'topic_sources': ['recent_messages'],
     'topics': [],
+    'allow_topic_shift': False,
+    'topic_shift_when': [],
+    'topic_shift_style': '',
+    'fallback_topics': [],
     'allowed_intents': ['light_chat', 'ask_open_question'],
     'forbidden_topics': [],
 }
@@ -223,6 +234,8 @@ def normalize_daemon(daemon_config=None):
         value = normalized.get(field_name)
         if value in (None, ''):
             normalized[field_name] = None
+        elif isinstance(value, Path):
+            normalized[field_name] = str(value)
         elif not isinstance(value, str):
             raise ConfigError('daemon.{} must be a string.'.format(field_name))
     for field_name in (
@@ -243,6 +256,64 @@ def normalize_daemon(daemon_config=None):
                 'daemon.{} must be greater than or equal to 1.'.format(
                     field_name))
         normalized[field_name] = value
+    return normalized
+
+
+def normalize_quota(quota_config=None):
+    if quota_config in (None, ''):
+        quota_config = {}
+    if not isinstance(quota_config, dict):
+        raise ConfigError('quota must contain a JSON object.')
+
+    normalized = dict(DEFAULT_QUOTA)
+    normalized.update(quota_config)
+    value = normalized.get('state_path')
+    if value in (None, ''):
+        normalized['state_path'] = None
+    elif isinstance(value, Path):
+        normalized['state_path'] = str(value)
+    elif not isinstance(value, str):
+        raise ConfigError('quota.state_path must be a string.')
+    return normalized
+
+
+def _normalize_daemon_overlay(daemon_config, preset_name):
+    normalized = dict(daemon_config)
+    for field_name in ('queue_path', 'lock_path', 'status_path'):
+        if field_name in normalized:
+            raise ConfigError(
+                'presets.{}.daemon.{} is not supported; configure daemon.{} at the top level.'.format(
+                    preset_name, field_name, field_name))
+
+    float_fields = {
+        'poll_interval': 0.0,
+        'task_ttl': 0.0,
+        'claim_ttl': 0.0,
+        'min_reply_interval': 0.0,
+        'stale_lock_after': 0.0,
+    }
+    int_fields = {
+        'max_pending': 1,
+        'max_task_context': 1,
+        'max_messages_per_hour': 1,
+        'max_consecutive_replies': 1,
+    }
+    for field_name, minimum in float_fields.items():
+        if field_name in normalized:
+            value = float(normalized[field_name])
+            if value < minimum:
+                raise ConfigError(
+                    'presets.{}.daemon.{} must be greater than or equal to {}.'.format(
+                        preset_name, field_name, minimum))
+            normalized[field_name] = value
+    for field_name, minimum in int_fields.items():
+        if field_name in normalized:
+            value = int(normalized[field_name])
+            if value < minimum:
+                raise ConfigError(
+                    'presets.{}.daemon.{} must be greater than or equal to {}.'.format(
+                        preset_name, field_name, minimum))
+            normalized[field_name] = value
     return normalized
 
 
@@ -370,24 +441,25 @@ def normalize_initiative(initiative=None, path='initiative',
     )
     normalized.update(initiative)
 
-    for field_name in ('enabled', 'avoid_when_active'):
+    for field_name in ('enabled', 'avoid_when_active', 'allow_topic_shift'):
         if field_name in normalized:
             normalized[field_name] = _social_bool(normalized, field_name, path)
-    for field_name in ('group_type', 'style'):
+    for field_name in ('group_type', 'style', 'topic_shift_style'):
         if field_name in normalized:
             normalized[field_name] = _social_string(
                 normalized.get(field_name), '{}.{}'.format(path, field_name))
-    for field_name in ('idle_after', 'cooldown', 'recent_window'):
+    for field_name in (
+            'idle_after', 'cooldown', 'min_start_after', 'recent_window'):
         if field_name in normalized:
             normalized[field_name] = _social_float(
                 normalized, field_name, path, minimum=0.0)
-    for field_name in ('max_starts', 'active_threshold'):
+    for field_name in ('max_starts', 'min_starts', 'active_threshold'):
         if field_name in normalized:
             normalized[field_name] = _social_int(
                 normalized, field_name, path, minimum=0)
     for field_name in (
             'topic_sources', 'topics', 'allowed_intents',
-            'forbidden_topics'):
+            'forbidden_topics', 'topic_shift_when', 'fallback_topics'):
         if field_name in normalized:
             normalized[field_name] = _social_string_list(
                 normalized.get(field_name), '{}.{}'.format(path, field_name))
@@ -511,6 +583,7 @@ def normalize_presets(presets=None):
         reply_policy = preset.get('reply_policy', {})
         initiative = preset.get('initiative', {})
         persona = preset.get('persona', {})
+        daemon_config = preset.get('daemon', {})
         if profile in (None, ''):
             profile = {}
         if round_config in (None, ''):
@@ -521,6 +594,8 @@ def normalize_presets(presets=None):
             initiative = {}
         if persona in (None, ''):
             persona = {}
+        if daemon_config in (None, ''):
+            daemon_config = {}
         if not isinstance(profile, dict):
             raise ConfigError(
                 'presets.{}.profile must contain a JSON object.'.format(
@@ -541,10 +616,15 @@ def normalize_presets(presets=None):
             raise ConfigError(
                 'presets.{}.persona must contain a JSON object.'.format(
                     preset_name))
+        if not isinstance(daemon_config, dict):
+            raise ConfigError(
+                'presets.{}.daemon must contain a JSON object.'.format(
+                    preset_name))
 
         normalized[preset_name] = {
             'profile': _normalize_profile_overlay(profile, preset_name),
             'round': _normalize_round_overlay(round_config, preset_name),
+            'daemon': _normalize_daemon_overlay(daemon_config, preset_name),
             'reply_policy': normalize_reply_policy(
                 reply_policy,
                 path='presets.{}.reply_policy'.format(preset_name),
@@ -567,7 +647,7 @@ class AppConfig:
             allowed_chats=None, state_path=None, audit_log_path=None,
             profile=None, round_config=None, presets=None, config_path=None,
             reply_policy=None, initiative=None, persona=None,
-            daemon_config=None):
+            daemon_config=None, quota_config=None):
         self.api_id = api_id
         self.api_hash = api_hash
         self.session_path = Path(session_path).expanduser().resolve()
@@ -581,6 +661,10 @@ class AppConfig:
             if self.daemon.get(field_name) is not None:
                 self.daemon[field_name] = (
                     Path(self.daemon[field_name]).expanduser().resolve())
+        self.quota = normalize_quota(quota_config)
+        if self.quota.get('state_path') is not None:
+            self.quota['state_path'] = (
+                Path(self.quota['state_path']).expanduser().resolve())
         self.reply_policy = normalize_reply_policy(reply_policy)
         self.initiative = normalize_initiative(initiative)
         self.persona = normalize_persona(persona)
@@ -640,6 +724,13 @@ class AppConfig:
         if preset:
             persona.update(preset.get('persona') or {})
         return normalize_persona(persona)
+
+    def resolve_daemon(self, preset_name=None):
+        daemon_config = dict(self.daemon)
+        preset = self._preset(preset_name)
+        if preset:
+            daemon_config.update(preset.get('daemon') or {})
+        return normalize_daemon(daemon_config)
 
 
 def default_config_paths(cwd=None):
@@ -738,6 +829,14 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
     daemon_config.setdefault(
         'status_path',
         str(base / 'tg_cli' / '.tg-cli-daemon-status.json'))
+    quota_config = dict(data.get('quota') or {})
+    quota_config.setdefault(
+        'state_path',
+        str(base / 'tg_cli' / '.tg-cli-quota-state.json'))
+    if quota_config.get('state_path') not in (None, ''):
+        quota_state_path = Path(quota_config['state_path']).expanduser()
+        if not quota_state_path.is_absolute():
+            quota_config['state_path'] = str(base / quota_state_path)
 
     cfg = AppConfig(
         api_id=api_id,
@@ -754,6 +853,7 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
         initiative=data.get('initiative'),
         persona=data.get('persona'),
         daemon_config=daemon_config,
+        quota_config=quota_config,
     )
     if require_credentials:
         cfg.require_credentials()

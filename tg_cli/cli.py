@@ -1,13 +1,18 @@
 import argparse
 import asyncio
 import copy
+import importlib
+import inspect
 import json
 import os
 import sqlite3
 import sys
 
 from . import __version__
-from .config import ConfigError, load_config, normalize_round
+from .config import (
+    ConfigError, load_config, normalize_chat_id, normalize_daemon,
+    normalize_round,
+)
 from . import daemon as daemon_store
 from . import safety
 from .safety import SafetyError
@@ -15,6 +20,39 @@ from .telegram_ops import (
     TelegramCliError, codex_context, daemon_run, dumps_json, get_me,
     group_context, history, interactive_round, list_dialogs, observe, send_text,
 )
+
+
+quota_store = None
+
+
+def _rewrite_quota_chat_args(args):
+    if args is None:
+        args = sys.argv[1:]
+    args = list(args)
+    rewritten = []
+    index = 0
+    while index < len(args):
+        value = args[index]
+        if (
+                value == '--chat'
+                and index + 1 < len(args)
+                and str(args[index + 1]).startswith('-')
+                and ':' in str(args[index + 1])):
+            rewritten.append('--chat={}'.format(args[index + 1]))
+            index += 2
+            continue
+        rewritten.append(value)
+        index += 1
+    return rewritten
+
+
+class TgArgumentParser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):
+        return super().parse_args(_rewrite_quota_chat_args(args), namespace)
+
+    def parse_known_args(self, args=None, namespace=None):
+        return super().parse_known_args(
+            _rewrite_quota_chat_args(args), namespace)
 
 
 def _print_json(data):
@@ -65,9 +103,17 @@ def _resolve_persona(config, preset_name=None):
     return dict(getattr(config, 'persona', {}) or {})
 
 
+def _resolve_daemon(config, preset_name=None):
+    if hasattr(config, 'resolve_daemon'):
+        return config.resolve_daemon(preset_name)
+    if preset_name not in (None, ''):
+        raise ConfigError('Presets are not supported by this config object.')
+    return normalize_daemon(getattr(config, 'daemon', {}) or {})
+
+
 def _copy_config_with_game_settings(
         config, profile, round_config=None, reply_policy=None,
-        initiative=None, persona=None, preset_name=None):
+        initiative=None, persona=None, daemon_config=None, preset_name=None):
     game_config = copy.copy(config)
     game_config.profile = profile
     if round_config is not None:
@@ -78,6 +124,8 @@ def _copy_config_with_game_settings(
         game_config.initiative = initiative
     if persona is not None:
         game_config.persona = persona
+    if daemon_config is not None:
+        game_config.daemon = daemon_config
     game_config.preset_name = preset_name
     return game_config
 
@@ -96,8 +144,216 @@ def _round_with_cli_overrides(round_config, args):
     return normalize_round(effective)
 
 
+def _quota_module():
+    global quota_store
+    if quota_store is None:
+        try:
+            quota_store = importlib.import_module('.quota', __package__)
+        except ImportError as exc:
+            raise TelegramCliError(
+                'Quota state support is not available yet; expected tg_cli.quota.'
+            ) from exc
+    return quota_store
+
+
+def _quota_state_path(config):
+    quota_config = getattr(config, 'quota', {}) or {}
+    state_path = quota_config.get('state_path')
+    if state_path in (None, ''):
+        raise ConfigError('quota.state_path is not configured.')
+    return state_path
+
+
+def _parse_quota_chat(value):
+    text = str(value or '').strip()
+    if ':' not in text:
+        raise argparse.ArgumentTypeError(
+            '--chat must use CHAT_ID:COUNT, for example 5217114569:120.')
+    chat_text, count_text = text.rsplit(':', 1)
+    chat_text = chat_text.strip()
+    count_text = count_text.strip()
+    if not chat_text:
+        raise argparse.ArgumentTypeError('quota chat id must not be empty.')
+    try:
+        chat_id = int(normalize_chat_id(chat_text))
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            'quota chat id must be an integer.') from exc
+    try:
+        target_count = int(count_text)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            'quota target count must be an integer.') from exc
+    if target_count < 1:
+        raise argparse.ArgumentTypeError(
+            'quota target count must be greater than 0.')
+    return {'chat_id': chat_id, 'target_count': target_count}
+
+
+def _quota_targets(chat_specs):
+    targets = []
+    seen = set()
+    for spec in chat_specs or []:
+        target = dict(spec)
+        chat_id = int(target['chat_id'])
+        if chat_id in seen:
+            raise ConfigError(
+                'Duplicate quota target chat id: {}.'.format(chat_id))
+        seen.add(chat_id)
+        targets.append({
+            'chat_id': chat_id,
+            'target_count': int(target['target_count']),
+        })
+    if not targets:
+        raise ConfigError('At least one --chat CHAT_ID:COUNT target is required.')
+    return targets
+
+
+def _quota_status(config):
+    store = _quota_module()
+    helper = getattr(store, 'status', None) or getattr(store, 'get_status', None)
+    if helper is None:
+        raise TelegramCliError(
+            'Quota state module must expose status(path) or get_status(path).')
+    return helper(_quota_state_path(config))
+
+
+def _quota_target_remaining(target):
+    return max(0, int(target.get('target_count') or 0) -
+               int(target.get('sent_count') or 0))
+
+
+def _select_quota_target(state):
+    candidates = []
+    for target in (state or {}).get('targets') or []:
+        remaining = _quota_target_remaining(target)
+        if target.get('status', 'active') != 'active' or remaining <= 0:
+            continue
+        candidates.append((remaining, target.get('last_sent_at') or '', target))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return candidates[0][2]
+
+
+async def _maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _quota_task_context(config, target, preset=None):
+    telegram_ops = importlib.import_module('.telegram_ops', __package__)
+    helper = (
+        getattr(telegram_ops, 'quota_task_context', None)
+        or getattr(telegram_ops, 'quota_context', None)
+    )
+    if helper is None:
+        return None
+    config.require_credentials()
+    return await _maybe_await(
+        helper(config, int(target['chat_id']), preset=preset))
+
+
+async def _quota_next_context_payload(config):
+    telegram_ops = importlib.import_module('.telegram_ops', __package__)
+    helper = getattr(telegram_ops, 'quota_next_context', None)
+    if helper is None:
+        return None
+    config.require_credentials()
+    return await _maybe_await(helper(config))
+
+
+def _quota_task_chat_id(task):
+    chat = (task or {}).get('chat') or {}
+    chat_id = chat.get('id') if isinstance(chat, dict) else None
+    if chat_id is None:
+        context = (task or {}).get('context') or {}
+        chat = context.get('chat') if isinstance(context, dict) else {}
+        chat_id = chat.get('id') if isinstance(chat, dict) else None
+    if chat_id is None:
+        chat_id = (task or {}).get('chat_id')
+    if chat_id is None:
+        raise TelegramCliError(
+            'Quota task is missing chat id: {}'.format(
+                (task or {}).get('id') or 'unknown'))
+    return int(normalize_chat_id(chat_id))
+
+
+def _config_for_quota_task(config, task):
+    task_config = copy.copy(config)
+    context = (task or {}).get('context') or {}
+    for field_name in ('profile', 'persona', 'reply_policy', 'initiative'):
+        value = task.get(field_name)
+        if value is None and isinstance(context, dict):
+            value = context.get(field_name)
+        if value is not None:
+            setattr(task_config, field_name, value)
+    return task_config
+
+
+def _validate_quota_reply(config, task, text):
+    task_config = _config_for_quota_task(config, task)
+    chat_id = _quota_task_chat_id(task)
+    safety.require_can_write(task_config, chat_id)
+    matches = safety.find_forbidden_terms(task_config, text)
+    if matches:
+        chat = task.get('chat') or {}
+        safety.audit_record(
+            task_config, 'quota_reply', chat_id,
+            chat_title=chat.get('title'), text=text,
+            status='blocked_forbidden_terms')
+        raise safety.SafetyError(
+            'Message contains forbidden/sensitive profile term(s): {}.'.format(
+                ', '.join(matches)))
+    return task_config
+
+
+async def _quota_send_reply(config, task_id, task, text, dry_run=False):
+    if dry_run:
+        task_config = _config_for_quota_task(config, task)
+        chat = task.get('chat') or {}
+        safety.audit_record(
+            task_config, 'quota_reply', _quota_task_chat_id(task),
+            chat_title=chat.get('title'), text=text,
+            dry_run=True, status='dry_run')
+        return {'sent': False, 'dry_run': True, 'message_ids': []}, False
+
+    telegram_ops = importlib.import_module('.telegram_ops', __package__)
+    quota_reply = getattr(telegram_ops, 'quota_reply', None)
+    if quota_reply is not None:
+        config.require_credentials()
+        result = quota_reply(config, task_id, text, dry_run=False)
+        result = await _maybe_await(result)
+        return (result if result is not None else {}), False
+
+    helper = getattr(telegram_ops, 'send_quota_reply', None)
+    if helper is None:
+        raise TelegramCliError(
+            'Quota reply sending is not available yet; expected '
+            'tg_cli.telegram_ops.send_quota_reply or quota_reply.')
+    config.require_credentials()
+    result = helper(config, task, text, dry_run=dry_run)
+    result = await _maybe_await(result)
+    return (result if result is not None else {}), True
+
+
+def _quota_message_ids(send_result, dry_run=False):
+    if dry_run:
+        return []
+    if isinstance(send_result, (list, tuple)):
+        return list(send_result)
+    if not isinstance(send_result, dict):
+        raise TelegramCliError('Quota reply helper returned an invalid result.')
+    if send_result.get('message_ids') is not None:
+        return list(send_result.get('message_ids') or [])
+    if send_result.get('message_id') is not None:
+        return [send_result['message_id']]
+    raise TelegramCliError('Quota reply helper did not return message ids.')
+
+
 def build_parser():
-    parser = argparse.ArgumentParser(prog='tg-cli')
+    parser = TgArgumentParser(prog='tg-cli')
     parser.add_argument('--version', action='version', version='tg-cli {}'.format(__version__))
     parser.add_argument('--config', help='Path to JSON config. Defaults to ./.tg-cli.json then ~/.config/tg-cli/config.json.')
     sub = parser.add_subparsers(dest='command', required=True)
@@ -235,6 +491,39 @@ def build_parser():
     daemon_status.add_argument('--json', action='store_true')
 
     daemon_sub.add_parser('stop', help='Ask the foreground daemon to stop.')
+
+    quota = sub.add_parser(
+        'quota', help='Manage multi-chat quota runs for external agents.')
+    quota_sub = quota.add_subparsers(dest='quota_command', required=True)
+
+    quota_start = quota_sub.add_parser(
+        'start', help='Start a quota run with one or more chat targets.')
+    quota_start.add_argument(
+        '--chat', action='append', type=_parse_quota_chat, required=True,
+        help='Target chat and successful-send count as CHAT_ID:COUNT.')
+    quota_start.add_argument('--preset', help='Named preset from config.presets.')
+    quota_start.add_argument('--json', action='store_true')
+
+    quota_status = quota_sub.add_parser(
+        'status', help='Show quota run state.')
+    quota_status.add_argument('--json', action='store_true')
+
+    quota_stop = quota_sub.add_parser(
+        'stop', help='Stop the current quota run.')
+    quota_stop.add_argument('--json', action='store_true')
+
+    quota_next = quota_sub.add_parser(
+        'next', help='Create the next quota task for an external operator.')
+    quota_next.add_argument('--json', action='store_true')
+
+    quota_reply = quota_sub.add_parser(
+        'reply', help='Send or validate a reply for one quota task.')
+    quota_reply.add_argument('task_id')
+    quota_reply.add_argument('text')
+    quota_reply.add_argument(
+        '--dry-run', action='store_true',
+        help='Validate without sending or incrementing quota counts.')
+    quota_reply.add_argument('--json', action='store_true')
 
     return parser
 
@@ -428,9 +717,11 @@ async def _cmd_daemon(args, config):
         initiative = _resolve_initiative(config, args.preset)
         persona = _resolve_persona(config, args.preset)
         round_config = _resolve_round(config, args.preset)
+        resolved_daemon = _resolve_daemon(config, args.preset)
         daemon_config = _copy_config_with_game_settings(
             config, profile, round_config, reply_policy=reply_policy,
-            initiative=initiative, persona=persona, preset_name=args.preset)
+            initiative=initiative, persona=persona,
+            daemon_config=resolved_daemon, preset_name=args.preset)
         await daemon_run(
             daemon_config, args.chat, preset=args.preset,
             duration=args.duration, dry_run=args.dry_run)
@@ -544,6 +835,132 @@ async def _cmd_daemon(args, config):
     raise AssertionError(args.daemon_command)
 
 
+async def _cmd_quota(args, config):
+    state_path = _quota_state_path(config)
+    store = _quota_module()
+
+    if args.quota_command == 'start':
+        targets = _quota_targets(args.chat)
+        if args.preset:
+            _resolve_profile(config, args.preset)
+        for target in targets:
+            safety.require_allowed_chat(config, target['chat_id'])
+        payload = store.create_run(state_path, targets, preset=args.preset)
+        if args.json:
+            print(dumps_json(payload))
+        else:
+            print('Started quota run {} with {} target(s).'.format(
+                payload.get('run_id', 'unknown'), len(targets)))
+        return
+
+    if args.quota_command == 'status':
+        payload = _quota_status(config)
+        if args.json:
+            print(dumps_json(payload))
+        else:
+            print('status={}'.format(payload.get('status') or 'none'))
+            for target in payload.get('targets') or []:
+                print('chat={} sent={}/{} status={}'.format(
+                    target.get('chat_id'),
+                    int(target.get('sent_count') or 0),
+                    int(target.get('target_count') or 0),
+                    target.get('status') or 'unknown'))
+        return
+
+    if args.quota_command == 'stop':
+        payload = store.stop_run(state_path)
+        if args.json:
+            print(dumps_json(payload))
+        else:
+            print('Stopped quota run {}.'.format(
+                payload.get('run_id', 'unknown')))
+        return
+
+    if args.quota_command == 'next':
+        context_payload = await _quota_next_context_payload(config)
+        if context_payload is not None:
+            if args.json:
+                print(dumps_json(context_payload))
+            else:
+                task = context_payload.get('task')
+                if task is None:
+                    print('No active quota target.')
+                else:
+                    print('Task: {} chat={}'.format(
+                        task.get('id'),
+                        task.get('chat_id')
+                        or ((task.get('context') or {}).get('chat') or {}).get('id')))
+                    context = context_payload.get('context') or {}
+                    prompt = context.get('prompt') or task.get('prompt') or ''
+                    if prompt:
+                        print('Prompt:')
+                        print(prompt)
+            return
+
+        state = _quota_status(config)
+        target = _select_quota_target(state)
+        if target is None:
+            payload = {'task': None, 'reason': 'no_active_quota_target'}
+            if args.json:
+                print(dumps_json(payload))
+            else:
+                print('No active quota target.')
+            return
+        context = await _quota_task_context(
+            config, target, preset=state.get('preset'))
+        task = store.create_task(
+            state_path, int(target['chat_id']), context=context)
+        if args.json:
+            print(dumps_json(task))
+        else:
+            print('Task: {} chat={} remaining={}'.format(
+                task.get('id'), target.get('chat_id'),
+                _quota_target_remaining(target)))
+            prompt = task.get('prompt') or ''
+            if prompt:
+                print('Prompt:')
+                print(prompt)
+        return
+
+    if args.quota_command == 'reply':
+        text = (args.text or '').strip()
+        if not text:
+            raise TelegramCliError('Reply text must not be empty.')
+        task = store.get_task(state_path, args.task_id)
+        if task is None:
+            raise TelegramCliError(
+                'Quota task not found: {}'.format(args.task_id))
+        _validate_quota_reply(config, task, text)
+        send_result, complete_in_cli = await _quota_send_reply(
+            config, args.task_id, task, text, dry_run=args.dry_run)
+        message_ids = _quota_message_ids(send_result, dry_run=args.dry_run)
+        if complete_in_cli:
+            completed = store.complete_task(
+                state_path, args.task_id, message_ids, dry_run=False)
+        elif args.dry_run:
+            completed = task
+        else:
+            completed = send_result.get('task') if isinstance(send_result, dict) else None
+        payload = {
+            'sent': not args.dry_run,
+            'dry_run': bool(args.dry_run),
+            'message_ids': message_ids,
+            'send_result': send_result,
+            'task': completed,
+        }
+        if args.json:
+            print(dumps_json(payload))
+        elif args.dry_run:
+            print('DRY-RUN quota reply accepted for task {}.'.format(
+                args.task_id))
+        else:
+            print('Sent quota reply for task {} ({} message id(s)).'.format(
+                args.task_id, len(message_ids)))
+        return
+
+    raise AssertionError(args.quota_command)
+
+
 def _status_payload(config):
     state = safety.load_state(config)
     return {
@@ -561,7 +978,11 @@ def main(argv=None):
     telegram_commands = {'me', 'groups', 'dialogs', 'history', 'send', 'game'}
     require_credentials = (
         args.command in telegram_commands
-        or (args.command == 'daemon' and args.daemon_command == 'run'))
+        or (args.command == 'daemon' and args.daemon_command == 'run')
+        or (
+            args.command == 'quota'
+            and args.quota_command == 'reply'
+            and not args.dry_run))
 
     try:
         config = load_config(args.config, require_credentials=require_credentials)
@@ -597,6 +1018,8 @@ def main(argv=None):
             _run(_cmd_game(args, config))
         elif args.command == 'daemon':
             _run(_cmd_daemon(args, config))
+        elif args.command == 'quota':
+            _run(_cmd_quota(args, config))
         else:
             parser.error('unknown command {}'.format(args.command))
         return 0

@@ -2,6 +2,8 @@ import json
 import sqlite3
 from types import SimpleNamespace
 
+import pytest
+
 from tg_cli import cli
 from tg_cli.config import AppConfig
 
@@ -126,6 +128,55 @@ def test_daemon_parser_accepts_queue_commands():
     assert reply_args.json is True
     assert skip_args.daemon_command == 'skip'
     assert skip_args.reason == 'unclear'
+
+
+def test_quota_parser_accepts_run_commands():
+    parser = cli.build_parser()
+
+    start_args = parser.parse_args([
+        'quota', 'start',
+        '--chat', '-1001937176825:120',
+        '--chat', '5217114569:300',
+        '--preset', 'chat_social',
+        '--json',
+    ])
+    status_args = parser.parse_args(['quota', 'status', '--json'])
+    stop_args = parser.parse_args(['quota', 'stop', '--json'])
+    next_args = parser.parse_args(['quota', 'next', '--json'])
+    reply_args = parser.parse_args([
+        'quota', 'reply', 'task-1', '短回复', '--dry-run', '--json'])
+
+    assert start_args.command == 'quota'
+    assert start_args.quota_command == 'start'
+    assert start_args.chat == [
+        {'chat_id': 1937176825, 'target_count': 120},
+        {'chat_id': 5217114569, 'target_count': 300},
+    ]
+    assert start_args.preset == 'chat_social'
+    assert start_args.json is True
+    assert status_args.quota_command == 'status'
+    assert status_args.json is True
+    assert stop_args.quota_command == 'stop'
+    assert stop_args.json is True
+    assert next_args.quota_command == 'next'
+    assert next_args.json is True
+    assert reply_args.quota_command == 'reply'
+    assert reply_args.task_id == 'task-1'
+    assert reply_args.text == '短回复'
+    assert reply_args.dry_run is True
+    assert reply_args.json is True
+
+
+def test_quota_parser_rejects_invalid_chat_targets(capsys):
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(['quota', 'start', '--chat', '5217114569'])
+    with pytest.raises(SystemExit):
+        parser.parse_args(['quota', 'start', '--chat', '5217114569:0'])
+
+    captured = capsys.readouterr()
+    assert 'CHAT_ID:COUNT' in captured.err or 'greater than 0' in captured.err
 
 
 def test_game_suggest_parser_accepts_operator():
@@ -407,6 +458,202 @@ def test_daemon_status_json_does_not_require_credentials(tmp_path, monkeypatch, 
     assert data['lock_path'].endswith('tg_cli/.tg-cli-daemon.lock')
 
 
+def test_quota_status_and_stop_do_not_require_credentials(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    class FakeQuotaStore:
+        def status(self, path):
+            return {
+                'status': 'active',
+                'state_path': str(path),
+                'targets': [],
+            }
+
+        def stop_run(self, path):
+            return {
+                'run_id': 'quota-test',
+                'status': 'stopped',
+                'state_path': str(path),
+            }
+
+    monkeypatch.setattr(cli, 'quota_store', FakeQuotaStore())
+
+    assert cli.main(['quota', 'status', '--json']) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload['status'] == 'active'
+    assert status_payload['state_path'].endswith(
+        'tg_cli/.tg-cli-quota-state.json')
+
+    assert cli.main(['quota', 'stop', '--json']) == 0
+    stop_payload = json.loads(capsys.readouterr().out)
+    assert stop_payload['status'] == 'stopped'
+    assert stop_payload['state_path'].endswith(
+        'tg_cli/.tg-cli-quota-state.json')
+
+
+def test_quota_start_enforces_allowed_chats_without_credentials(
+        tmp_path, monkeypatch, capsys):
+    captured = {}
+
+    class FakeQuotaStore:
+        def create_run(self, path, targets, preset=None):
+            captured['path'] = path
+            captured['targets'] = targets
+            captured['preset'] = preset
+            return {
+                'run_id': 'quota-test',
+                'status': 'active',
+                'preset': preset,
+                'targets': targets,
+            }
+
+    monkeypatch.setattr(cli, 'quota_store', FakeQuotaStore())
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569, 1937176825],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        quota_config={'state_path': str(tmp_path / 'quota-state.json')},
+        presets={'chat_social': {'profile': {'max_chars': 42}}},
+    )
+
+    args = cli.build_parser().parse_args([
+        'quota', 'start',
+        '--chat', '5217114569:120',
+        '--chat', '-1001937176825:300',
+        '--preset', 'chat_social',
+        '--json',
+    ])
+    cli._run(cli._cmd_quota(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['status'] == 'active'
+    assert captured['path'] == config.quota['state_path']
+    assert captured['targets'] == [
+        {'chat_id': 5217114569, 'target_count': 120},
+        {'chat_id': 1937176825, 'target_count': 300},
+    ]
+    assert captured['preset'] == 'chat_social'
+
+    blocked_args = cli.build_parser().parse_args([
+        'quota', 'start', '--chat', '999:1'])
+    with pytest.raises(cli.SafetyError, match='not whitelisted'):
+        cli._run(cli._cmd_quota(blocked_args, config))
+
+
+def test_quota_next_creates_task_for_largest_remaining_target(
+        tmp_path, monkeypatch, capsys):
+    captured = {}
+
+    async def no_context_payload(config):
+        return None
+
+    class FakeQuotaStore:
+        def status(self, path):
+            return {
+                'run_id': 'quota-test',
+                'status': 'active',
+                'preset': 'chat_social',
+                'targets': [
+                    {
+                        'chat_id': 1,
+                        'target_count': 120,
+                        'sent_count': 119,
+                        'status': 'active',
+                    },
+                    {
+                        'chat_id': 2,
+                        'target_count': 300,
+                        'sent_count': 10,
+                        'status': 'active',
+                    },
+                ],
+            }
+
+        def create_task(self, path, chat_id, context=None):
+            captured['path'] = path
+            captured['chat_id'] = chat_id
+            captured['context'] = context
+            return {
+                'id': 'task-2',
+                'status': 'pending',
+                'chat_id': chat_id,
+            }
+
+    monkeypatch.setattr(cli, 'quota_store', FakeQuotaStore())
+    monkeypatch.setattr(cli, '_quota_next_context_payload', no_context_payload)
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[1, 2],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        quota_config={'state_path': str(tmp_path / 'quota-state.json')},
+    )
+
+    args = cli.build_parser().parse_args(['quota', 'next', '--json'])
+    cli._run(cli._cmd_quota(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['id'] == 'task-2'
+    assert captured['path'] == config.quota['state_path']
+    assert captured['chat_id'] == 2
+    assert captured['context'] is None
+
+
+def test_quota_reply_dry_run_validates_without_completing_or_credentials(
+        tmp_path, monkeypatch, capsys):
+    captured = {}
+
+    class FakeQuotaStore:
+        def get_task(self, path, task_id):
+            captured['get_path'] = path
+            captured['task_id'] = task_id
+            return {
+                'id': task_id,
+                'status': 'pending',
+                'chat': {'id': 5217114569, 'title': 'test chat'},
+                'profile': {'style': 'brief', 'forbidden_terms': []},
+            }
+
+        def complete_task(self, path, task_id, message_ids, dry_run=False):
+            captured['complete_path'] = path
+            captured['complete_task_id'] = task_id
+            captured['message_ids'] = message_ids
+            captured['dry_run'] = dry_run
+            return {
+                'id': task_id,
+                'status': 'pending',
+                'dry_run_checked': dry_run,
+            }
+
+    monkeypatch.setattr(cli, 'quota_store', FakeQuotaStore())
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        quota_config={'state_path': str(tmp_path / 'quota-state.json')},
+    )
+
+    args = cli.build_parser().parse_args([
+        'quota', 'reply', 'task-1', '来了', '--dry-run', '--json'])
+    cli._run(cli._cmd_quota(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['sent'] is False
+    assert payload['dry_run'] is True
+    assert payload['message_ids'] == []
+    assert payload['task']['status'] == 'pending'
+    assert captured['get_path'] == config.quota['state_path']
+    assert 'complete_path' not in captured
+
+
 def test_daemon_next_skip_and_reply_queue_lifecycle(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     config = AppConfig(
@@ -455,6 +702,60 @@ def test_daemon_next_skip_and_reply_queue_lifecycle(tmp_path, monkeypatch, capsy
     assert skip_payload['skipped'] is True
     assert skip_payload['task']['status'] == 'skipped'
     assert skip_payload['task']['reason'] == 'changed'
+
+
+def test_daemon_run_applies_preset_daemon_overlay(tmp_path, monkeypatch):
+    captured = {}
+
+    async def fake_daemon_run(
+            config, chat, preset=None, duration=3600.0, dry_run=False,
+            output_func=print):
+        captured['chat'] = chat
+        captured['preset'] = preset
+        captured['duration'] = duration
+        captured['dry_run'] = dry_run
+        captured['daemon'] = dict(config.daemon)
+
+    monkeypatch.setattr(cli, 'daemon_run', fake_daemon_run)
+    config = AppConfig(
+        api_id=1,
+        api_hash='hash',
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        daemon_config={
+            'queue_path': str(tmp_path / 'queue.json'),
+            'lock_path': str(tmp_path / 'daemon.lock'),
+            'status_path': str(tmp_path / 'status.json'),
+            'min_reply_interval': 6,
+            'max_messages_per_hour': 20,
+        },
+        presets={
+            'chat_social': {
+                'daemon': {
+                    'min_reply_interval': 2,
+                    'max_messages_per_hour': 240,
+                    'max_consecutive_replies': 4,
+                },
+            },
+        })
+
+    args = cli.build_parser().parse_args([
+        'daemon', 'run', '5217114569',
+        '--preset', 'chat_social',
+        '--duration', '60',
+        '--dry-run',
+    ])
+    cli._run(cli._cmd_daemon(args, config))
+
+    assert captured['chat'] == '5217114569'
+    assert captured['preset'] == 'chat_social'
+    assert captured['duration'] == 60
+    assert captured['dry_run'] is True
+    assert captured['daemon']['min_reply_interval'] == 2.0
+    assert captured['daemon']['max_messages_per_hour'] == 240
+    assert captured['daemon']['max_consecutive_replies'] == 4
 
 
 def test_daemon_reply_dry_run_does_not_consume_task(tmp_path, monkeypatch, capsys):

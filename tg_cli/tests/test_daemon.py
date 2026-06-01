@@ -275,10 +275,12 @@ def test_queue_reply_and_complete_reply_pending_task(tmp_path):
         task['id']]
     assert daemon.reply_pending_tasks(queue_path, 1) == []
 
-    completed = daemon.complete_task(queue_path, task['id'], message_id=9)
+    completed = daemon.complete_task(
+        queue_path, task['id'], message_id=9, message_ids=[9, 10])
 
     assert completed['status'] == 'completed'
     assert completed['message_id'] == 9
+    assert completed['message_ids'] == [9, 10]
     assert daemon.reply_pending_tasks(queue_path) == []
 
 

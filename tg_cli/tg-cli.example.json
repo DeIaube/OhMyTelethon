@@ -18,6 +18,9 @@
     "max_messages_per_hour": 20,
     "max_consecutive_replies": 2
   },
+  "quota": {
+    "state_path": ".tg-cli-quota-state.json"
+  },
   "profile": {
     "style": "自然、简短、像普通群聊，不要长篇解释。",
     "language": "中文",
@@ -70,11 +73,17 @@
     "idle_after": 90,
     "cooldown": 180,
     "max_starts": 1,
+    "min_starts": 0,
+    "min_start_after": 60,
     "avoid_when_active": true,
     "active_threshold": 6,
     "recent_window": 300,
     "topic_sources": ["recent_messages", "preset_topics"],
     "topics": ["最近有啥好玩的", "这个有人试过吗"],
+    "allow_topic_shift": false,
+    "topic_shift_when": [],
+    "topic_shift_style": "",
+    "fallback_topics": [],
     "allowed_intents": ["ask_open_question", "continue_recent_topic", "share_small_reaction"],
     "forbidden_topics": ["广告", "交易", "隐私", "争吵", "灰产"]
   },
@@ -125,37 +134,56 @@
     },
     "chat_social": {
       "profile": {
-        "style": "普通群聊 social 档：更愿意接梗和抛轻量问题，但不连续刷屏。",
-        "max_chars": 70
+        "style": "普通群聊 social 档：更愿意接具体话题和轻微抛梗；当前话题不适合接时，可以自然换一个安全轻话题；不刷屏、不灌水。",
+        "max_chars": 80
       },
       "persona": {
-        "identity": "外向群友，愿意接话但不刷屏。",
-        "traits": ["熟人感", "轻微调侃", "短句"],
+        "identity": "外向但有分寸的群友，愿意接话但不自言自语。",
+        "traits": ["接具体话题", "轻微调侃", "短句"],
         "catchphrases": ["有点东西", "这也太真实了", "先试试"],
-        "avoid": ["冒犯", "强行带节奏", "装懂"]
+        "avoid": ["冒犯", "强行带节奏", "装懂", "刷屏", "灌水", "重复说跟不上"]
       },
       "reply_policy": {
         "group_type": "chat",
-        "reply_threshold": 0.4,
-        "prefer_reply_when": ["open topic", "light joke", "question", "recent harmless topic"],
-        "style_rules": ["short", "casual", "question-back is ok"]
+        "reply_threshold": 0.35,
+        "prefer_reply_when": ["specific harmless topic", "direct question", "light joke", "recent topic i can actually join"],
+        "skip_when": ["ads", "spam", "privacy", "conflict", "grey area", "unclear reference", "no safe fallback topic"],
+        "style_rules": ["reply to a concrete latest point", "one idea per turn", "max two short parts", "do not comment on chat speed unless directly relevant", "do not repeat filler"]
       },
       "initiative": {
         "enabled": true,
         "style": "social",
-        "idle_after": 30,
-        "cooldown": 75,
-        "max_starts": 2,
+        "idle_after": 35,
+        "cooldown": 45,
+        "max_starts": 4,
+        "min_starts": 2,
+        "min_start_after": 25,
         "avoid_when_active": true,
-        "active_threshold": 5,
+        "active_threshold": 6,
         "recent_window": 120,
-        "topics": ["今天群里这么安静吗", "你们最近都在玩啥", "有没有人来一把"],
-        "allowed_intents": ["ask_open_question", "continue_recent_topic", "invite_opinion"]
+        "allow_topic_shift": true,
+        "topic_shift_when": ["ads", "spam", "grey area", "unclear reference", "no concrete safe opening"],
+        "topic_shift_style": "像群友随口换话题，不解释为什么换话题。",
+        "topics": ["刚才那点有人继续说吗", "这个有人试过吗", "你们最近都在玩啥"],
+        "fallback_topics": ["你们最近都在玩啥游戏", "这两天有啥好玩的事吗", "晚上有人开黑吗", "最近有什么值得试的新东西吗"],
+        "allowed_intents": ["ask_open_question", "continue_recent_topic", "invite_opinion", "start_light_topic"]
       },
       "round": {
-        "reply_probability": 0.7,
-        "min_reply_interval": 6,
-        "max_replies": 12
+        "reply_probability": 0.75,
+        "min_reply_interval": 5,
+        "max_replies": 12,
+        "skip_short_ack": true,
+        "merge_window": 1,
+        "split_long_replies": true,
+        "split_max_chars": 36,
+        "split_max_parts": 2,
+        "split_delay_min": 1.2,
+        "split_delay_max": 2.2
+      },
+      "daemon": {
+        "min_reply_interval": 4,
+        "max_messages_per_hour": 60,
+        "max_consecutive_replies": 4
       }
     },
     "friends_normal": {
