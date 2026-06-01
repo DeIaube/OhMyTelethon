@@ -159,11 +159,12 @@ def save_queue(path, payload):
 
 
 def create_task(chat, messages, profile, persona, reply_policy, initiative,
-                preset=None, kind='message', prompt=None, now=None):
+                preset=None, kind='message', prompt=None, now=None,
+                context_summary=None):
     timestamp = _iso_utc(now)
     compact_ts = timestamp.replace(':', '').replace('+', '').replace('-', '')
     compact_ts = compact_ts.replace('.', '')
-    return {
+    task = {
         'id': '{}-{}'.format(compact_ts, uuid.uuid4().hex[:12]),
         'status': 'pending',
         'kind': str(kind),
@@ -178,6 +179,9 @@ def create_task(chat, messages, profile, persona, reply_policy, initiative,
         'updated_at': timestamp,
         'prompt': prompt,
     }
+    if context_summary is not None:
+        task['context_summary'] = _deepcopy_json(context_summary)
+    return task
 
 
 def _active_count(tasks):

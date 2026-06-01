@@ -146,6 +146,25 @@ def test_game_suggest_parser_accepts_operator():
     assert args.json is True
 
 
+def test_game_context_parser_defaults_to_codex_operator():
+    parser = cli.build_parser()
+
+    args = parser.parse_args([
+        'game', 'context', '5217114569',
+        '--limit', '200',
+        '--preset', 'chat_social',
+        '--json',
+    ])
+
+    assert args.command == 'game'
+    assert args.game_command == 'context'
+    assert args.chat == '5217114569'
+    assert args.limit == 200
+    assert args.preset == 'chat_social'
+    assert args.operator == 'codex'
+    assert args.json is True
+
+
 def test_game_round_parser_humanization_flags():
     parser = cli.build_parser()
 
@@ -317,6 +336,61 @@ def test_game_suggest_json_applies_preset(monkeypatch, tmp_path, capsys):
     assert data['operator'] == 'codex'
     assert data['preset'] == 'casual'
     assert data['profile']['style'] == 'casual style'
+
+
+def test_game_context_json_applies_preset(monkeypatch, tmp_path, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        'game', 'context', '5217114569',
+        '--preset', 'casual',
+        '--operator', 'claude',
+        '--json',
+    ])
+
+    async def fake_group_context(config, chat, limit, operator='agent', preset=None):
+        return {
+            'chat': {'id': int(chat), 'title': 'test chat'},
+            'operator': operator,
+            'preset': preset,
+            'profile': dict(config.profile),
+            'persona': dict(config.persona),
+            'reply_policy': dict(config.reply_policy),
+            'initiative': dict(config.initiative),
+            'message_count': 0,
+            'active_speakers': [],
+            'recent_topics': [],
+            'keywords': [],
+            'bot_or_notice_messages': {'count': 0, 'messages': []},
+            'recent_questions': [],
+            'summary': 'empty',
+            'guidance': [],
+            'messages_tail': [],
+        }
+
+    monkeypatch.setattr(cli, 'group_context', fake_group_context)
+    config = AppConfig(
+        api_id=1,
+        api_hash='hash',
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        profile={'style': 'global style'},
+        persona={'identity': 'global persona'},
+        presets={
+            'casual': {
+                'profile': {'style': 'casual style'},
+                'persona': {'identity': 'casual persona'},
+            },
+        })
+
+    cli._run(cli._cmd_game(args, config))
+
+    data = json.loads(capsys.readouterr().out)
+    assert data['operator'] == 'claude'
+    assert data['preset'] == 'casual'
+    assert data['profile']['style'] == 'casual style'
+    assert data['persona']['identity'] == 'casual persona'
 
 
 def test_daemon_status_json_does_not_require_credentials(tmp_path, monkeypatch, capsys):

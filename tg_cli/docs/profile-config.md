@@ -197,6 +197,8 @@ v0.4 non-goals:
 
 ## Prompt Behavior
 
+`tg-cli game context <chat> --limit 200 --preset NAME --operator codex --json` returns a larger entry warmup summary before daemon or longer live tests. It includes resolved `profile`, `persona`, `reply_policy`, `initiative`, active speakers, local keyword/topic signals, notice/bot messages, recent questions, guidance, and a bounded message tail. The CLI does not call an LLM or generate a reply.
+
 `tg-cli game suggest <chat>` returns `profile`, `persona`, `reply_policy`, `initiative`, selected `preset`, and recent messages. The CLI does not call an LLM or generate a reply.
 
 `tg-cli game round <chat>` prints the resolved guidance once at startup. For each inbound message or merged batch it prints the incoming text, optionally recent context, and a compact instruction. Empty input skips the message. `/quit` stops the round.

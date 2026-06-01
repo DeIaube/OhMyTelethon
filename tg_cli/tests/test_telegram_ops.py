@@ -92,6 +92,97 @@ def test_codex_context_includes_full_profile_and_operator(monkeypatch, tmp_path)
     assert '你是 Claude' in data['instruction']
 
 
+def test_group_context_summarizes_recent_history(monkeypatch, tmp_path):
+    async def fake_history(config, chat, limit):
+        assert chat == '5217114569'
+        assert limit == 200
+        return {'id': 5217114569, 'title': 'test chat'}, [
+            {
+                'id': 1,
+                'date': '2026-06-01T00:00:00+00:00',
+                'sender_id': 2,
+                'sender': 'alice',
+                'out': False,
+                'text': '今晚开黑吗？',
+            },
+            {
+                'id': 2,
+                'date': '2026-06-01T00:00:02+00:00',
+                'sender_id': 3,
+                'sender': 'bot',
+                'out': False,
+                'text': 'alice joined the group',
+            },
+            {
+                'id': 3,
+                'date': '2026-06-01T00:00:05+00:00',
+                'sender_id': 4,
+                'sender': 'bob',
+                'out': False,
+                'text': '开黑开黑，我打野',
+            },
+            {
+                'id': 4,
+                'date': '2026-06-01T00:00:09+00:00',
+                'sender_id': 2,
+                'sender': 'alice',
+                'out': False,
+                'text': '那先等三分钟',
+            },
+        ]
+
+    monkeypatch.setattr(telegram_ops, 'history', fake_history)
+    config = make_config(tmp_path, profile={'style': 'brief'})
+    config.persona = {'identity': '普通群友'}
+    config.reply_policy = {'prefer_reply_when': ['direct question']}
+    config.initiative = {'enabled': False}
+
+    data = asyncio.run(telegram_ops.group_context(
+        config, '5217114569', 200, operator='codex', preset='chat_social'))
+
+    assert data['operator'] == 'codex'
+    assert data['preset'] == 'chat_social'
+    assert data['message_count'] == 4
+    assert data['active_speakers'][0] == {
+        'sender': 'alice',
+        'sender_id': 2,
+        'count': 2,
+    }
+    assert '开黑' in data['recent_topics']
+    assert data['keywords'][0]['text'] == '开黑'
+    assert data['recent_questions'][0]['id'] == 1
+    assert data['bot_or_notice_messages']['count'] == 1
+    assert len(data['messages_tail']) == 4
+    assert '最近 4 条消息' in data['summary']
+    assert 'Codex/Claude' not in data['summary']
+    assert data['guidance']
+
+
+def test_task_context_summary_drops_raw_message_tail(tmp_path):
+    config = make_config(tmp_path)
+    context = telegram_ops.summarize_group_context(
+        config,
+        {'id': 5217114569, 'title': 'test chat'},
+        [{
+            'id': 1,
+            'date': '2026-06-01T00:00:00+00:00',
+            'sender_id': 2,
+            'sender': 'alice',
+            'out': False,
+            'text': '今晚开黑吗？',
+        }],
+        operator='daemon',
+        preset='public_group_safe')
+
+    task_summary = telegram_ops._task_context_summary(context)
+
+    assert task_summary['message_count'] == 1
+    assert task_summary['recent_topics']
+    assert task_summary['recent_questions'][0]['id'] == 1
+    assert 'messages_tail' not in task_summary
+    assert 'profile' not in task_summary
+
+
 def test_short_ack_detection_handles_low_information_messages():
     assert telegram_ops._is_short_ack('嗯') is True
     assert telegram_ops._is_short_ack('哈哈哈') is True
@@ -428,6 +519,10 @@ def test_daemon_run_refreshes_lock_on_status_updates(tmp_path, monkeypatch):
             def decorator(handler):
                 return handler
             return decorator
+
+        async def iter_messages(self, entity, limit=None):
+            if False:
+                yield None
 
         async def disconnect(self):
             return None

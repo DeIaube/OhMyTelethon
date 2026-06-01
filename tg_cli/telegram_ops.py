@@ -1,9 +1,11 @@
 import asyncio
 import copy
+import collections
 import datetime as _dt
 import json
 import os
 import random
+import re
 import string
 
 from telethon import TelegramClient, events, utils
@@ -56,6 +58,36 @@ def _format_ts(value):
     return value.isoformat()
 
 
+_ENGLISH_STOP_WORDS = {
+    'the', 'and', 'for', 'you', 'are', 'with', 'that', 'this', 'have', 'from',
+    'just', 'not', 'but', 'all', 'can', 'will', 'was', 'were', 'has', 'had',
+    'they', 'them', 'his', 'her', 'she', 'him', 'our', 'out', 'about', 'what',
+    'when', 'where', 'why', 'how', 'your', 'into', 'then', 'than', 'too',
+    'joined', 'left', 'group', 'channel', 'message',
+}
+
+_CHINESE_STOP_CHARS = set('的了呢啊呀吧吗么哦嗯哈我你他她它们这那个一是不在有就都和也还先')
+_QUESTION_RE = re.compile(r'[?？]|(吗|嘛|么|呢|谁|啥|什么|怎么|怎样|如何|哪|几|是否|有没有)')
+_URL_RE = re.compile(r'https?://\S+|www\.\S+')
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_'-]{2,}")
+_CHINESE_TEXT_RE = re.compile(r'[\u4e00-\u9fff]{2,}')
+_NOTICE_PHRASES = (
+    'joined the group',
+    'left the group',
+    'pinned a message',
+    'changed the group',
+    'created the group',
+    'removed',
+    '加入了群',
+    '加入群',
+    '退出了群',
+    '离开了群',
+    '置顶',
+    '群公告',
+    '撤回了一条消息',
+)
+
+
 def _emit(output_func, text=''):
     try:
         output_func(text, flush=True)
@@ -68,6 +100,226 @@ def _remember_inbound_message(seen_ids, message_id):
         return False
     seen_ids.add(message_id)
     return True
+
+
+def _clean_context_text(text):
+    text = _URL_RE.sub(' ', str(text or ''))
+    return text.strip()
+
+
+def _is_question_text(text):
+    return bool(_QUESTION_RE.search(str(text or '')))
+
+
+def _is_bot_or_notice_message(item):
+    text = str((item or {}).get('text') or '')
+    sender = str((item or {}).get('sender') or '')
+    sender_lower = sender.casefold()
+    text_lower = text.casefold()
+    if 'bot' in sender_lower:
+        return True
+    return any(phrase in text_lower for phrase in _NOTICE_PHRASES)
+
+
+def _context_message_excerpt(item, max_chars=120):
+    text = str((item or {}).get('text') or '').strip()
+    max_chars = int(max_chars)
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + '...'
+    return {
+        'id': (item or {}).get('id'),
+        'date': (item or {}).get('date'),
+        'sender_id': (item or {}).get('sender_id'),
+        'sender': (item or {}).get('sender'),
+        'out': bool((item or {}).get('out')),
+        'text': text,
+    }
+
+
+def _context_keywords(messages, max_keywords=10):
+    counts = collections.Counter()
+    last_seen = {}
+    for index, item in enumerate(messages or []):
+        if _is_bot_or_notice_message(item):
+            continue
+        text = _clean_context_text((item or {}).get('text'))
+        if not text:
+            continue
+
+        for match in _ENGLISH_WORD_RE.findall(text):
+            token = match.casefold().strip("_'-")
+            if len(token) < 3 or token in _ENGLISH_STOP_WORDS:
+                continue
+            counts[token] += 1
+            last_seen[token] = index
+
+        for chunk in _CHINESE_TEXT_RE.findall(text):
+            if 2 <= len(chunk) <= 6 and not any(ch in _CHINESE_STOP_CHARS for ch in chunk):
+                counts[chunk] += 1
+                last_seen[chunk] = index
+            if len(chunk) >= 3:
+                for start in range(0, len(chunk) - 1):
+                    token = chunk[start:start + 2]
+                    if any(ch in _CHINESE_STOP_CHARS for ch in token):
+                        continue
+                    counts[token] += 1
+                    last_seen[token] = index
+
+    ranked = sorted(
+        counts,
+        key=lambda token: (-counts[token], -last_seen.get(token, -1), token))
+    return [
+        {'text': token, 'count': counts[token]}
+        for token in ranked[:int(max_keywords)]
+    ]
+
+
+def _context_active_speakers(messages, max_speakers=8):
+    counts = {}
+    order = {}
+    for index, item in enumerate(messages or []):
+        if _is_bot_or_notice_message(item):
+            continue
+        sender = (item or {}).get('sender') or 'unknown'
+        sender_id = (item or {}).get('sender_id')
+        key = (sender_id, sender)
+        counts[key] = counts.get(key, 0) + 1
+        order[key] = index
+
+    ranked = sorted(
+        counts,
+        key=lambda key: (-counts[key], -order.get(key, -1), str(key[1])))
+    return [
+        {
+            'sender': key[1],
+            'sender_id': key[0],
+            'count': counts[key],
+        }
+        for key in ranked[:int(max_speakers)]
+    ]
+
+
+def _context_recent_questions(messages, max_questions=5):
+    questions = []
+    for item in messages or []:
+        if _is_bot_or_notice_message(item):
+            continue
+        if _is_question_text((item or {}).get('text')):
+            questions.append(_context_message_excerpt(item))
+    return questions[-int(max_questions):]
+
+
+def _context_notices(messages, max_messages=5):
+    notices = [
+        _context_message_excerpt(item)
+        for item in (messages or [])
+        if _is_bot_or_notice_message(item)
+    ]
+    return {
+        'count': len(notices),
+        'messages': notices[-int(max_messages):],
+    }
+
+
+def _context_summary_sentence(message_count, active_speakers, keywords,
+                              recent_questions, notice_count):
+    speaker_text = ', '.join(
+        '{}({})'.format(item['sender'], item['count'])
+        for item in active_speakers[:5])
+    keyword_text = ', '.join(item['text'] for item in keywords[:6])
+    parts = ['最近 {} 条消息'.format(int(message_count))]
+    parts.append('活跃发言者: {}'.format(speaker_text or 'none'))
+    parts.append('高频话题: {}'.format(keyword_text or 'none'))
+    if recent_questions:
+        latest = recent_questions[-1]
+        parts.append('最近问题: [{}] {}: {}'.format(
+            latest.get('id'), latest.get('sender'), latest.get('text')))
+    else:
+        parts.append('最近问题: none')
+    parts.append('机器人/通知类消息: {} 条'.format(int(notice_count)))
+    return '；'.join(parts) + '。'
+
+
+def _context_guidance(profile, reply_policy, initiative, recent_questions):
+    max_chars = (profile or {}).get('max_chars')
+    guidance = [
+        'Use summary and recent_topics for warmup; use messages_tail for exact latest wording.',
+        'Only reply when the latest tail or recent_questions gives a natural opening; otherwise skip.',
+    ]
+    if max_chars:
+        guidance.append(
+            'Keep any proposed reply short, preferably within profile.max_chars={}.'.format(
+                max_chars))
+    skip_when = (reply_policy or {}).get('skip_when') or []
+    if skip_when:
+        guidance.append('Skip when context matches: {}.'.format(
+            _format_named_list(skip_when)))
+    if initiative and initiative.get('enabled'):
+        guidance.append(
+            'Initiative is enabled but remains bounded by idle/cooldown/risk guidance.')
+    if recent_questions:
+        guidance.append('Recent questions may be the best entry point if still relevant.')
+    return guidance
+
+
+def summarize_group_context(config, row, messages, operator='agent', preset=None,
+                            tail_limit=12):
+    messages = list(messages or [])
+    profile = dict(getattr(config, 'profile', {}) or {})
+    persona = dict(getattr(config, 'persona', {}) or {})
+    reply_policy = dict(getattr(config, 'reply_policy', {}) or {})
+    initiative = dict(getattr(config, 'initiative', {}) or {})
+    operator = (operator or 'agent').strip() or 'agent'
+    tail_limit = max(0, int(tail_limit))
+
+    active_speakers = _context_active_speakers(messages)
+    keywords = _context_keywords(messages)
+    recent_questions = _context_recent_questions(messages)
+    bot_or_notice_messages = _context_notices(messages)
+    recent_topics = [item['text'] for item in keywords[:6]]
+    messages_tail = [
+        _context_message_excerpt(item, max_chars=200)
+        for item in messages[-tail_limit:]
+    ] if tail_limit else []
+    summary = _context_summary_sentence(
+        len(messages), active_speakers, keywords, recent_questions,
+        bot_or_notice_messages['count'])
+
+    return {
+        'chat': copy.deepcopy(row),
+        'operator': operator,
+        'preset': preset or None,
+        'profile': profile,
+        'persona': persona,
+        'reply_policy': reply_policy,
+        'initiative': initiative,
+        'message_count': len(messages),
+        'active_speakers': active_speakers,
+        'recent_topics': recent_topics,
+        'keywords': keywords,
+        'bot_or_notice_messages': bot_or_notice_messages,
+        'recent_questions': recent_questions,
+        'summary': summary,
+        'guidance': _context_guidance(
+            profile, reply_policy, initiative, recent_questions),
+        'messages_tail': messages_tail,
+    }
+
+
+def _task_context_summary(context):
+    if not context:
+        return None
+    notices = context.get('bot_or_notice_messages') or {}
+    return {
+        'message_count': context.get('message_count', 0),
+        'active_speakers': copy.deepcopy(context.get('active_speakers') or []),
+        'recent_topics': list(context.get('recent_topics') or []),
+        'keywords': copy.deepcopy(context.get('keywords') or []),
+        'bot_or_notice_count': int(notices.get('count') or 0),
+        'recent_questions': copy.deepcopy(context.get('recent_questions') or []),
+        'summary': context.get('summary') or '',
+        'guidance': list(context.get('guidance') or []),
+    }
 
 
 def _format_profile_guidance(profile):
@@ -570,6 +822,15 @@ async def history(config, chat, limit):
             })
         messages.reverse()
         return row, messages
+
+
+async def group_context(config, chat, limit, operator='agent', preset=None):
+    limit = int(limit)
+    if limit < 1:
+        raise TelegramCliError('limit must be greater than 0.')
+    row, messages = await history(config, chat, limit)
+    return summarize_group_context(
+        config, row, messages, operator=operator, preset=preset)
 
 
 async def send_text(config, chat, text, assume_yes=False, dry_run=False,
@@ -1252,6 +1513,11 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
         me_names = _mention_names(me)
         entity, row = await resolve_chat(client, chat)
         safety.require_allowed_chat(config, row['id'])
+        startup_messages = await _recent_context_lines(client, entity, 200)
+        startup_context = summarize_group_context(
+            config, row, startup_messages, operator='daemon', preset=preset,
+            tail_limit=min(int(daemon_config['max_task_context']), 12))
+        context_summary = _task_context_summary(startup_context)
         update_status(row=row, running=True)
         emit(
             'Daemon started: {} (id={}) duration={}s preset={} dry_run={}.'.format(
@@ -1284,7 +1550,8 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
                 initiative=initiative,
                 preset=preset,
                 kind=kind,
-                prompt=prompt)
+                prompt=prompt,
+                context_summary=context_summary)
             task['dry_run'] = bool(dry_run)
             appended = daemon_store.append_task(
                 queue_path, task,

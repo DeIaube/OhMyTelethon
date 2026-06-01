@@ -64,6 +64,29 @@ def test_load_queue_defaults_and_append_next_complete_lifecycle(tmp_path):
     assert daemon.queue_counts(queue_path) == {'completed': 1}
 
 
+def test_create_task_can_include_context_summary():
+    task = daemon.create_task(
+        chat={'id': 2400000996, 'title': 'test group'},
+        messages=[{'id': 1, 'text': 'hello'}],
+        profile={'style': 'short'},
+        persona={},
+        reply_policy={},
+        initiative={},
+        context_summary={
+            'message_count': 200,
+            'summary': 'recent warmup',
+            'recent_topics': ['开黑'],
+        },
+        now='2026-06-01T00:00:00+00:00',
+    )
+
+    assert task['context_summary'] == {
+        'message_count': 200,
+        'summary': 'recent warmup',
+        'recent_topics': ['开黑'],
+    }
+
+
 def test_append_task_respects_max_pending(tmp_path):
     queue_path = tmp_path / 'queue.json'
     first = make_task(now='2026-06-01T00:00:00+00:00')

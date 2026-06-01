@@ -12,8 +12,8 @@ from . import daemon as daemon_store
 from . import safety
 from .safety import SafetyError
 from .telegram_ops import (
-    TelegramCliError, codex_context, daemon_run, dumps_json, get_me, history,
-    interactive_round, list_dialogs, observe, send_text,
+    TelegramCliError, codex_context, daemon_run, dumps_json, get_me,
+    group_context, history, interactive_round, list_dialogs, observe, send_text,
 )
 
 
@@ -144,6 +144,17 @@ def build_parser():
         '--operator', default='agent',
         help='Operator name to include in the generated instruction, such as codex or claude.')
     suggest.add_argument('--json', action='store_true')
+
+    context = game_sub.add_parser(
+        'context',
+        help='Read recent history and print an agent-ready group warmup summary.')
+    context.add_argument('chat')
+    context.add_argument('--limit', '-n', type=int, default=200)
+    context.add_argument('--preset', help='Named profile/round preset from config.presets.')
+    context.add_argument(
+        '--operator', default='codex',
+        help='Operator name to include in the generated context, such as codex or claude.')
+    context.add_argument('--json', action='store_true')
 
     round_cmd = game_sub.add_parser('round', help='Run a bounded interactive agent-operated chat round.')
     round_cmd.add_argument('chat')
@@ -305,6 +316,37 @@ async def _cmd_game(args, config):
                 print('- [{id}] {sender}: {text}'.format(**item))
             print('\nAgent instruction:')
             print(data['instruction'])
+        return
+    if args.game_command == 'context':
+        profile = _resolve_profile(config, args.preset)
+        reply_policy = _resolve_reply_policy(config, args.preset)
+        initiative = _resolve_initiative(config, args.preset)
+        persona = _resolve_persona(config, args.preset)
+        game_config = _copy_config_with_game_settings(
+            config, profile, reply_policy=reply_policy,
+            initiative=initiative, persona=persona, preset_name=args.preset)
+        data = await group_context(
+            game_config, args.chat, args.limit,
+            operator=args.operator, preset=args.preset)
+        if args.json:
+            print(dumps_json(data))
+        else:
+            print('Chat: {title} (id={id})'.format(**data['chat']))
+            print('Operator: {}'.format(data['operator']))
+            print('Preset: {}'.format(data['preset'] or 'default'))
+            print('Messages analyzed: {}'.format(data['message_count']))
+            print('Summary: {}'.format(data['summary']))
+            print('Active speakers:')
+            for item in data['active_speakers']:
+                print('- {sender}: {count}'.format(**item))
+            print('Recent topics: {}'.format(
+                ', '.join(data['recent_topics']) or 'none'))
+            print('Recent questions:')
+            for item in data['recent_questions']:
+                print('- [{id}] {sender}: {text}'.format(**item))
+            print('Guidance:')
+            for item in data['guidance']:
+                print('- {}'.format(item))
         return
     if args.game_command == 'round':
         profile = _resolve_profile(config, args.preset)

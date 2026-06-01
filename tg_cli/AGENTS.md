@@ -21,6 +21,7 @@ Current capabilities:
 - `tg-cli send <chat> <text>`: send one message through whitelist, pause, confirmation, and audit checks.
 - `tg-cli pause` / `tg-cli resume` / `tg-cli status`: manage write safety state.
 - `tg-cli game observe <chat>`: observe live messages.
+- `tg-cli game context <chat> --limit 200 --preset public_group_safe --operator codex --json`: read a larger recent-history window and emit a compact agent warmup summary without sending.
 - `tg-cli game suggest <chat>`: print an agent-ready context bundle, including the resolved profile, without sending.
 - `tg-cli game suggest <chat> --preset chat_normal --operator claude`: render the context instruction for a named external operator such as Codex or Claude with a named preset overlay.
 - `tg-cli game round <chat> --duration 60 --max-replies 8`: run a bounded interactive chat round where the current agent/operator supplies replies and the CLI sends them through the safety layer.
@@ -46,6 +47,7 @@ Profile config:
 - `daemon.*` has defaults in `tg_cli.config`. Keep `queue_path`, `lock_path`, and `status_path` local ignored files by default. `poll_interval`, `task_ttl`, `claim_ttl`, `max_pending`, `max_task_context`, `min_reply_interval`, `max_messages_per_hour`, and `max_consecutive_replies` are safety and queue controls, not prompt guidance.
 - Top-level `presets` can contain named `profile`, `persona`, `reply_policy`, `initiative`, and `round` overlays. `game suggest` and `game round` select them with `--preset NAME`; command flags still override preset round values. Social Policy examples should keep normal/social initiative as explicit presets such as `chat_normal` and `chat_social`, with default initiative off or low-frequency.
 - `game suggest` must include the selected preset name, the full resolved `profile`, `persona`, `reply_policy`, `initiative`, and the selected operator name.
+- `game context` must remain local and deterministic. It may compute active speakers, keywords/topics, notice messages, recent questions, summary, guidance, and a bounded message tail, but it must not call model providers or store hundreds of raw messages in daemon tasks.
 - `game round` must show resolved profile, persona, reply policy, and initiative guidance before asking the operator for a reply.
 - `daemon next` task payloads must be usable by Codex/Claude without model-provider coupling. The command claims a lease by default; use `--peek` only for read-only inspection. The CLI owns Telegram IO and local queue state only; external operators decide reply/skip.
 

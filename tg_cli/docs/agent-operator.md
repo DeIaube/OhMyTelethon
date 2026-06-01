@@ -7,12 +7,16 @@
 Use this when the agent wants to inspect recent context, write one reply, and send it explicitly.
 
 ```sh
+tg-cli game context 2400000996 --operator codex --limit 200 --json
+tg-cli game context 2400000996 --preset public_group_safe --operator codex --limit 200 --json
 tg-cli game suggest 2400000996 --operator codex --limit 20 --json
 tg-cli game suggest 2400000996 --preset chat_normal --operator codex --limit 20 --json
 tg-cli game suggest 2400000996 --preset chat_social --operator codex --limit 20 --json
 ```
 
-The JSON output includes:
+Use `game context` as the entry warmup before longer operation. It reads a larger recent-history window and returns a compact local summary: active speakers, recent topics/keywords, notice or bot messages, recent questions, guidance, and a bounded `messages_tail`. It does not call a model provider; Codex/Claude still interprets the output and decides how to behave.
+
+The `game suggest` JSON output includes:
 
 - `chat`: resolved chat metadata.
 - `operator`: the operator name used in the instruction.

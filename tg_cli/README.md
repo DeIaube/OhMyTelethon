@@ -37,6 +37,7 @@ tg-cli pause
 tg-cli resume
 tg-cli status
 tg-cli game observe 5217114569
+tg-cli game context 5217114569 --limit 200 --preset public_group_safe --operator codex --json
 tg-cli game suggest 5217114569 --limit 20 --json
 tg-cli game suggest 5217114569 --preset chat_normal --operator codex --json
 tg-cli game suggest 5217114569 --preset chat_social --operator codex --json
@@ -62,7 +63,9 @@ tg-cli daemon status --json
 tg-cli daemon stop
 ```
 
-`game suggest` does not call an LLM. It prints an agent-ready context bundle with the selected `preset` name plus resolved `profile`, `persona`, `reply_policy`, and `initiative`. Codex, Claude, or another external agent decides the reply, then sends through `tg-cli send`.
+`game context` does not call an LLM. It reads a larger recent-history window and prints an agent-ready warmup summary: active speakers, local keyword/topic signals, notice/bot messages, recent questions, a compact summary, guidance, and a small message tail. Use it before daemon or longer live tests so the external agent knows what the group has recently been discussing without copying hundreds of raw messages into each task.
+
+`game suggest` does not call an LLM. It prints an agent-ready reply context bundle with the selected `preset` name plus resolved `profile`, `persona`, `reply_policy`, and `initiative`. Codex, Claude, or another external agent decides the reply, then sends through `tg-cli send`.
 
 `game round` is the bounded live game loop. It listens for new messages, prints recent context plus a compact agent instruction, asks the current operator for a reply, sends through the safety layer, and exits when `--duration` or `--max-replies` is reached. `--max-replies` is enforced as an outbound Telegram message cap, so a split reply will not exceed the cap. Use empty input to skip the current message and `/quit` to stop the round. At the end it prints a structured round report with elapsed time, received message counts, prompt count, sent reply count, sent message ids, skip reasons, average reply length, and initiative counts.
 
