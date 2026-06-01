@@ -23,6 +23,10 @@ DEFAULT_QUEUE = {
     'tasks': [],
 }
 
+ACTIVE_TASK_STATUSES = ('pending', 'claimed', 'reply_pending', 'held_rate_limit')
+CLAIM_FIELDS = ('claim_owner', 'claimed_at', 'claim_expires_at')
+RATE_LIMIT_FIELDS = ('rate_limit_reason', 'retry_after')
+
 _QUEUE_THREAD_LOCKS = {}
 _QUEUE_THREAD_LOCKS_GUARD = threading.Lock()
 
@@ -176,30 +180,81 @@ def create_task(chat, messages, profile, persona, reply_policy, initiative,
     }
 
 
-def _pending_count(tasks):
-    return sum(1 for task in tasks if task.get('status') == 'pending')
+def _active_count(tasks):
+    return sum(
+        1 for task in tasks
+        if task.get('status') in ACTIVE_TASK_STATUSES)
 
 
 def append_task(path, task, max_pending=None):
     with _locked_queue(path):
         queue = _load_queue_unlocked(path)
-        if max_pending is not None and _pending_count(queue['tasks']) >= int(max_pending):
+        if max_pending is not None and _active_count(queue['tasks']) >= int(max_pending):
             return False
         queue['tasks'].append(_deepcopy_json(task))
         _save_queue_unlocked(path, queue)
         return True
 
 
-def _is_expired(task, now_dt, task_ttl):
+def _is_expired(task, now_dt, task_ttl, timestamp_fields=('created_at',)):
     if task_ttl is None:
         return False
     ttl = float(task_ttl)
     if ttl < 0:
         return False
-    created_at = _parse_time(task.get('created_at'))
-    if created_at is None:
+    started_at = None
+    for field_name in timestamp_fields:
+        started_at = _parse_time(task.get(field_name))
+        if started_at is not None:
+            break
+    if started_at is None:
         return False
-    return (now_dt - created_at).total_seconds() > ttl
+    return (now_dt - started_at).total_seconds() > ttl
+
+
+def _clear_fields(task, field_names):
+    for field_name in field_names:
+        task.pop(field_name, None)
+
+
+def _release_expired_claim(task, now_dt, now_text):
+    if task.get('status') != 'claimed':
+        return False
+    expires_at = _parse_time(task.get('claim_expires_at'))
+    if expires_at is None or expires_at > now_dt:
+        return False
+    task['status'] = 'pending'
+    task['updated_at'] = now_text
+    _clear_fields(task, CLAIM_FIELDS)
+    return True
+
+
+def _expire_pending_tasks(queue, now_dt, now_text, task_ttl):
+    changed = False
+    for task in queue['tasks']:
+        if task.get('status') not in ('pending', 'claimed'):
+            continue
+        if _is_expired(task, now_dt, task_ttl):
+            task['status'] = 'expired'
+            task['updated_at'] = now_text
+            _clear_fields(task, CLAIM_FIELDS)
+            changed = True
+            continue
+        changed = _release_expired_claim(task, now_dt, now_text) or changed
+    return changed
+
+
+def _oldest_pending_task(queue, now_dt):
+    oldest = None
+    oldest_created_at = None
+    for task in queue['tasks']:
+        if task.get('status') != 'pending':
+            continue
+        created_at = _parse_time(task.get('created_at')) or now_dt
+        if oldest is None or created_at < oldest_created_at:
+            oldest = task
+            oldest_created_at = created_at
+    return oldest
 
 
 def next_pending_task(path, now=None, task_ttl=None):
@@ -207,30 +262,39 @@ def next_pending_task(path, now=None, task_ttl=None):
         queue = _load_queue_unlocked(path)
         now_text = _iso_utc(now)
         now_dt = _parse_time(now_text)
-        changed = False
-        oldest = None
-        oldest_created_at = None
-
-        for task in queue['tasks']:
-            if task.get('status') != 'pending':
-                continue
-            if _is_expired(task, now_dt, task_ttl):
-                task['status'] = 'expired'
-                task['updated_at'] = now_text
-                changed = True
-                continue
-            created_at = _parse_time(task.get('created_at')) or now_dt
-            if oldest is None or created_at < oldest_created_at:
-                oldest = task
-                oldest_created_at = created_at
+        changed = _expire_pending_tasks(queue, now_dt, now_text, task_ttl)
+        oldest = _oldest_pending_task(queue, now_dt)
 
         if changed:
             _save_queue_unlocked(path, queue)
         return _deepcopy_json(oldest) if oldest is not None else None
 
 
+def claim_next_task(path, now=None, task_ttl=None, claim_ttl=300, owner=None):
+    with _locked_queue(path):
+        queue = _load_queue_unlocked(path)
+        now_text = _iso_utc(now)
+        now_dt = _parse_time(now_text)
+        changed = _expire_pending_tasks(queue, now_dt, now_text, task_ttl)
+        oldest = _oldest_pending_task(queue, now_dt)
+        if oldest is None:
+            if changed:
+                _save_queue_unlocked(path, queue)
+            return None
+
+        claim_ttl = max(0.0, float(claim_ttl or 0.0))
+        expires_at = now_dt + _dt.timedelta(seconds=claim_ttl)
+        oldest['status'] = 'claimed'
+        oldest['updated_at'] = now_text
+        oldest['claim_owner'] = owner or str(os.getpid())
+        oldest['claimed_at'] = now_text
+        oldest['claim_expires_at'] = _iso_utc(expires_at)
+        _save_queue_unlocked(path, queue)
+        return _deepcopy_json(oldest)
+
+
 def _update_task(path, task_id, status, fields=None, now=None,
-                 allowed_statuses=('pending',)):
+                 allowed_statuses=('pending',), clear_fields=()):
     with _locked_queue(path):
         queue = _load_queue_unlocked(path)
         now_text = _iso_utc(now)
@@ -242,6 +306,7 @@ def _update_task(path, task_id, status, fields=None, now=None,
                 return None
             task['status'] = status
             task['updated_at'] = now_text
+            _clear_fields(task, clear_fields)
             task.update(fields)
             _save_queue_unlocked(path, queue)
             return _deepcopy_json(task)
@@ -264,36 +329,89 @@ def complete_task(path, task_id, message_id=None, dry_run=False):
         fields['message_id'] = message_id
     return _update_task(
         path, task_id, 'completed', fields=fields,
-        allowed_statuses=('pending', 'reply_pending'))
+        allowed_statuses=('pending', 'claimed', 'reply_pending', 'held_rate_limit'),
+        clear_fields=CLAIM_FIELDS + RATE_LIMIT_FIELDS)
 
 
 def skip_task(path, task_id, reason='skipped'):
     return _update_task(
         path, task_id, 'skipped', fields={'reason': reason},
-        allowed_statuses=('pending', 'reply_pending'))
+        allowed_statuses=('pending', 'claimed', 'reply_pending', 'held_rate_limit'),
+        clear_fields=CLAIM_FIELDS + RATE_LIMIT_FIELDS)
 
 
-def queue_reply_task(path, task_id, text, dry_run=False):
+def queue_reply_task(path, task_id, text, dry_run=False, now=None):
+    now_text = _iso_utc(now)
     return _update_task(
         path, task_id, 'reply_pending',
         fields={
             'reply_text': str(text or '').strip(),
             'reply_dry_run': bool(dry_run),
+            'reply_queued_at': now_text,
         },
-        allowed_statuses=('pending',))
+        now=now_text,
+        allowed_statuses=('pending', 'claimed'),
+        clear_fields=CLAIM_FIELDS + RATE_LIMIT_FIELDS)
 
 
-def reply_pending_tasks(path, chat_id=None):
-    queue = load_queue(path)
-    tasks = []
+def hold_rate_limited_task(path, task_id, reason='rate_limit',
+                           retry_after=None, now=None):
+    retry_after_text = _iso_utc(retry_after) if retry_after is not None else None
+    fields = {'rate_limit_reason': str(reason or 'rate_limit')}
+    if retry_after_text is not None:
+        fields['retry_after'] = retry_after_text
+    return _update_task(
+        path, task_id, 'held_rate_limit',
+        fields=fields,
+        now=now,
+        allowed_statuses=('reply_pending',),
+        clear_fields=CLAIM_FIELDS)
+
+
+def _expire_or_release_reply_tasks(queue, now_dt, now_text, task_ttl):
+    changed = False
     for task in queue['tasks']:
-        if task.get('status') != 'reply_pending':
+        status = task.get('status')
+        if status not in ('reply_pending', 'held_rate_limit'):
             continue
-        if chat_id is not None:
-            task_chat = task.get('chat') or {}
-            if int(task_chat.get('id')) != int(chat_id):
+        if _is_expired(
+                task, now_dt, task_ttl,
+                timestamp_fields=('reply_queued_at', 'updated_at', 'created_at')):
+            task['status'] = 'expired'
+            task['updated_at'] = now_text
+            _clear_fields(task, CLAIM_FIELDS + RATE_LIMIT_FIELDS)
+            changed = True
+            continue
+        if status != 'held_rate_limit':
+            continue
+        retry_after = _parse_time(task.get('retry_after'))
+        if retry_after is not None and retry_after > now_dt:
+            continue
+        task['status'] = 'reply_pending'
+        task['updated_at'] = now_text
+        _clear_fields(task, RATE_LIMIT_FIELDS)
+        changed = True
+    return changed
+
+
+def reply_pending_tasks(path, chat_id=None, now=None, task_ttl=None):
+    with _locked_queue(path):
+        queue = _load_queue_unlocked(path)
+        now_text = _iso_utc(now)
+        now_dt = _parse_time(now_text)
+        changed = _expire_or_release_reply_tasks(
+            queue, now_dt, now_text, task_ttl)
+        tasks = []
+        for task in queue['tasks']:
+            if task.get('status') != 'reply_pending':
                 continue
-        tasks.append(_deepcopy_json(task))
+            if chat_id is not None:
+                task_chat = task.get('chat') or {}
+                if int(task_chat.get('id')) != int(chat_id):
+                    continue
+            tasks.append(_deepcopy_json(task))
+        if changed:
+            _save_queue_unlocked(path, queue)
     tasks.sort(key=lambda item: _parse_time(item.get('updated_at')) or _parse_time(utc_now()))
     return tasks
 

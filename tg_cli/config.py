@@ -45,6 +45,7 @@ DEFAULT_DAEMON = {
     'status_path': None,
     'poll_interval': 1.0,
     'task_ttl': 900.0,
+    'claim_ttl': 300.0,
     'max_pending': 20,
     'max_task_context': 8,
     'min_reply_interval': 6.0,
@@ -225,7 +226,7 @@ def normalize_daemon(daemon_config=None):
         elif not isinstance(value, str):
             raise ConfigError('daemon.{} must be a string.'.format(field_name))
     for field_name in (
-            'poll_interval', 'task_ttl', 'min_reply_interval',
+            'poll_interval', 'task_ttl', 'claim_ttl', 'min_reply_interval',
             'stale_lock_after'):
         value = float(normalized.get(field_name))
         if value < 0.0:

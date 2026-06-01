@@ -6,6 +6,7 @@
     "status_path": ".tg-cli-daemon-status.json",
     "poll_interval": 1,
     "task_ttl": 900,
+    "claim_ttl": 300,
     "max_pending": 20,
     "max_task_context": 8,
     "min_reply_interval": 6,

@@ -52,6 +52,7 @@ tg-cli game round 5217114569 --duration 120 --quiet-context \
 tg-cli game round 5217114569 --split-long-replies
 tg-cli daemon run 5217114569 --preset chat_social --duration 3600 --dry-run
 tg-cli daemon next
+tg-cli daemon next --peek
 tg-cli daemon next --json
 tg-cli daemon reply <task_id> "这把先看看队友怎么说" --dry-run
 tg-cli daemon reply <task_id> "这把先看看队友怎么说" --json
@@ -65,7 +66,7 @@ tg-cli daemon stop
 
 `game round` is the bounded live game loop. It listens for new messages, prints recent context plus a compact agent instruction, asks the current operator for a reply, sends through the safety layer, and exits when `--duration` or `--max-replies` is reached. `--max-replies` is enforced as an outbound Telegram message cap, so a split reply will not exceed the cap. Use empty input to skip the current message and `/quit` to stop the round. At the end it prints a structured round report with elapsed time, received message counts, prompt count, sent reply count, sent message ids, skip reasons, average reply length, and initiative counts.
 
-`daemon` is the v0.4 long-running operator mode. It still does not call an LLM or model provider. `tg-cli daemon run <chat>` owns Telegram IO for one whitelisted chat, writes local pending tasks when the account may naturally reply or open a light topic, and keeps local status/lock files. Codex, Claude, or another external agent reads the next pending item with `daemon next`, then either queues a reply with `daemon reply <task_id> "..."` or skips it with `daemon skip <task_id>`. The foreground daemon sends queued replies from the same Telethon session, so queue commands do not open Telegram while the daemon is running. Every send still goes through whitelist, `pause`, forbidden-term checks, daemon rate limits, dry-run behavior where applicable, and audit logging.
+`daemon` is the v0.4 long-running operator mode. It still does not call an LLM or model provider. `tg-cli daemon run <chat>` owns Telegram IO for one whitelisted chat, writes local pending tasks when the account may naturally reply or open a light topic, and keeps local status/lock files. Codex, Claude, or another external agent claims the next pending item with `daemon next`, then either queues a reply with `daemon reply <task_id> "..."` or skips it with `daemon skip <task_id>`. The foreground daemon sends queued replies from the same Telethon session, so queue commands do not open Telegram while the daemon is running. Every send still goes through whitelist, `pause`, forbidden-term checks, daemon rate limits, dry-run behavior where applicable, and audit logging.
 
 Suggested first Social Policy test:
 
@@ -91,13 +92,14 @@ Round operator flags:
 Daemon task queue commands:
 
 - `daemon run <chat> --preset NAME --duration SECONDS --dry-run`: start one foreground daemon for one whitelisted chat. `--dry-run` lets the queue flow be tested without sending replies.
-- `daemon next [--json]`: print the next pending local task for Codex/Claude, including bounded recent context and resolved Social Policy guidance.
-- `daemon reply <task_id> "..." [--dry-run] [--json]`: validate and queue one reply for the running daemon to send. With `--dry-run`, validate/audit and mark the task complete without sending.
+- `daemon next [--json]`: claim the next pending local task for Codex/Claude, including bounded recent context and resolved Social Policy guidance. The claim lease expires after `daemon.claim_ttl`.
+- `daemon next --peek [--json]`: inspect the next pending task without claiming it.
+- `daemon reply <task_id> "..." [--dry-run] [--json]`: validate and queue one claimed or pending reply for the running daemon to send. With `--dry-run`, validate/audit without changing task state.
 - `daemon skip <task_id> [--reason TEXT] [--json]`: mark a task skipped without sending.
 - `daemon status [--json]`: show daemon lock, queue, pause, and rate-limit status.
 - `daemon stop`: request the foreground daemon to stop cleanly.
 
-Daemon config lives under top-level `daemon` in `tg_cli/.tg-cli.json`. The default local files are ignored by git: `.tg-cli-daemon-queue.json`, `.tg-cli-daemon-status.json`, and `.tg-cli-daemon.lock`.
+Daemon config lives under top-level `daemon` in `tg_cli/.tg-cli.json`. The default local files are ignored by git: `.tg-cli-daemon-queue.json`, `.tg-cli-daemon-queue.json.lock`, `.tg-cli-daemon-status.json`, and `.tg-cli-daemon.lock`.
 
 v0.4 daemon scope is intentionally narrow: one chat per daemon, local task queue only, no model API calls, no launchd/system service, no web UI, and no multi-group hosting. Multi-group and long-term background service behavior should be added only after the single-chat queue has proven stable.
 
@@ -112,7 +114,8 @@ v0.4 daemon scope is intentionally narrow: one chat per daemon, local task queue
 - `game round` rate-limits sends and stops prompting near the end of a bounded round.
 - `game round` can skip low-information messages, skip by probability, merge rapid messages, and delay sends without becoming a daemon or auto mode.
 - `daemon run` uses a single-instance lock so two daemons do not write the same queue/session at the same time.
-- `daemon reply` must keep enforcing `allowed_chats`, `pause`, forbidden terms, and audit logging before a reply enters the send queue; `daemon run` enforces minimum reply interval, per-hour message limit, consecutive reply limit, and final send audit.
+- `daemon next` claims tasks with a lease, so another operator does not receive the same task until the lease expires.
+- `daemon reply` must keep enforcing `allowed_chats`, `pause`, forbidden terms, and audit logging before a reply enters the send queue; `daemon run` enforces minimum reply interval, per-hour message limit, consecutive reply limit, stale queued-reply expiration, and final send audit.
 - Long round replies can be split into several messages, with each part still passing forbidden-term checks and audit logging.
 - Audit logs store message hashes and lengths, not raw message text.
 - Use one long-running `tg-cli` process per Telethon session file. If another command runs while `game round` or `daemon run` owns the same session, the CLI reports a readable session-lock error instead of a raw SQLite traceback.

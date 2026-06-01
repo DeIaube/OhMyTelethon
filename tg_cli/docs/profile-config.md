@@ -22,6 +22,7 @@ Default initiative should stay off or low-frequency. More active behavior belong
     "status_path": ".tg-cli-daemon-status.json",
     "poll_interval": 1,
     "task_ttl": 900,
+    "claim_ttl": 300,
     "max_pending": 20,
     "max_task_context": 8,
     "min_reply_interval": 6,
@@ -107,7 +108,8 @@ For a credential-free starter file, see `tg_cli/docs/local-profile-template.json
 - `daemon.lock_path`: Local single-instance lock file used by `daemon run`. This should stay ignored by git.
 - `daemon.status_path`: Local status file for daemon state and heartbeat. This should stay ignored by git.
 - `daemon.poll_interval`: Seconds between daemon polling/status ticks.
-- `daemon.task_ttl`: Seconds before a pending task is considered stale.
+- `daemon.task_ttl`: Seconds before a pending or queued reply task is considered stale.
+- `daemon.claim_ttl`: Seconds before a `daemon next` task claim can be reclaimed by another operator.
 - `daemon.max_pending`: Maximum queued pending tasks before new prompts are skipped or delayed.
 - `daemon.max_task_context`: Maximum recent messages included in each queued task.
 - `daemon.min_reply_interval`: Minimum seconds between successful daemon replies.
@@ -161,6 +163,7 @@ The expected v0.4 daemon commands are:
 ```sh
 tg-cli daemon run 5217114569 --preset chat_social --duration 3600 --dry-run
 tg-cli daemon next
+tg-cli daemon next --peek
 tg-cli daemon next --json
 tg-cli daemon reply <task_id> "这把先看看队友怎么说" --dry-run
 tg-cli daemon reply <task_id> "这把先看看队友怎么说" --json
@@ -173,11 +176,12 @@ tg-cli daemon stop
 
 `daemon run` is a foreground single-chat process. It listens to one whitelisted chat, writes local pending tasks, updates status, and holds a single-instance lock. It does not call Codex, Claude, OpenAI, Anthropic, or any other model provider.
 
-Codex/Claude operate the queue with `daemon next`, `daemon reply`, and `daemon skip`. A queued task should contain enough bounded context for the external operator to decide whether to reply naturally. `daemon reply` validates and queues the reply; the foreground `daemon run` process sends queued replies from the active Telethon session. This avoids opening Telegram from a second process while the daemon owns the session.
+Codex/Claude operate the queue with `daemon next`, `daemon reply`, and `daemon skip`. `daemon next` claims a task lease by default so another operator does not receive the same task; use `daemon next --peek` only for read-only inspection. A queued task should contain enough bounded context for the external operator to decide whether to reply naturally. `daemon reply --dry-run` validates and audits without consuming the task. `daemon reply` without dry-run validates and queues the reply; the foreground `daemon run` process sends queued replies from the active Telethon session. This avoids opening Telegram from a second process while the daemon owns the session.
 
 Default local daemon files:
 
 - `.tg-cli-daemon-queue.json`
+- `.tg-cli-daemon-queue.json.lock`
 - `.tg-cli-daemon-status.json`
 - `.tg-cli-daemon.lock`
 
@@ -232,7 +236,7 @@ Audit records store text hashes and lengths, not raw message text.
 
 Social Policy guidance does not bypass safety. Active or social presets still pass the same `allowed_chats` whitelist, global `pause`, forbidden-term checks, round rate limits, audit logging, and final round report.
 
-Daemon guidance also does not bypass safety. `daemon reply` must pass whitelist, `pause`, forbidden-term checks, and queue audit before a reply can be queued. The running daemon enforces daemon-specific `min_reply_interval`, `max_messages_per_hour`, `max_consecutive_replies`, and final send audit before the reply reaches Telegram.
+Daemon guidance also does not bypass safety. `daemon reply` must pass whitelist, `pause`, forbidden-term checks, and queue audit before a reply can be queued. The running daemon enforces daemon-specific `min_reply_interval`, `max_messages_per_hour`, `max_consecutive_replies`, stale queued-reply expiration, held rate-limit retry state, and final send audit before the reply reaches Telegram.
 
 ## Round Options
 

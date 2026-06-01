@@ -72,12 +72,13 @@ Start one foreground daemon for one whitelisted chat:
 tg-cli daemon run 2400000996 --preset chat_social --duration 3600 --dry-run
 ```
 
-`daemon run` listens to the chat, resolves the selected Social Policy preset, and writes pending tasks into the local queue when a reply or bounded proactive opening may be natural. It owns a single-instance lock while running and updates local status. The queue, status, and lock files are local ignored files.
+`daemon run` listens to the chat, resolves the selected Social Policy preset, and writes pending tasks into the local queue when a reply or bounded proactive opening may be natural. It owns a single-instance lock while running and updates local status. The queue, queue lock, status, and daemon lock files are local ignored files.
 
 Codex, Claude, or another external operator then works the queue:
 
 ```sh
 tg-cli daemon next
+tg-cli daemon next --peek
 tg-cli daemon next --json
 tg-cli daemon reply <task_id> "这把先看看队友怎么说" --dry-run
 tg-cli daemon reply <task_id> "这把先看看队友怎么说" --json
@@ -90,14 +91,14 @@ tg-cli daemon stop
 
 Expected operator loop:
 
-- Run `daemon next --json` to fetch one pending task with recent context and resolved `profile`, `persona`, `reply_policy`, and `initiative`.
+- Run `daemon next --json` to claim one pending task with recent context and resolved `profile`, `persona`, `reply_policy`, and `initiative`. The claim lease expires after `daemon.claim_ttl`; use `daemon next --peek --json` only when inspecting without taking the task.
 - Decide outside the CLI whether a normal person would reply, skip, or wait.
-- Use `daemon reply <task_id> "..." --dry-run` for the first pass in a new group or config; it validates, audits, and marks the task complete without sending.
+- Use `daemon reply <task_id> "..." --dry-run` for the first pass in a new group or config; it validates and audits without sending or consuming the task.
 - Use `daemon reply <task_id> "..."` only when the message is short, natural, and still relevant. This queues the reply; the foreground `daemon run` process sends it from the active Telethon session.
 - Use `daemon skip <task_id> --reason TEXT` for spam, ads, private data, conflict, stale context, low information, or anything the operator cannot join naturally.
 - Check `daemon status --json` before and after longer runs.
 
-Every daemon reply still goes through `allowed_chats`, `pause`, forbidden-term checks, queue audit logging, daemon rate limits, consecutive reply limits, final send audit logging, and the local single-instance lock. `daemon stop` requests a clean shutdown; it is not a destructive reset of queue or audit history.
+Every daemon reply still goes through `allowed_chats`, `pause`, forbidden-term checks, queue audit logging, daemon rate limits, consecutive reply limits, stale queued-reply expiration, held rate-limit retry state, final send audit logging, and the local single-instance lock. `daemon stop` requests a clean shutdown; it is not a destructive reset of queue or audit history.
 
 v0.4 intentionally does not support multi-group hosting, automatic model-provider calls, launchd/system service setup, or a web UI. Keep those out of operator workflows until the single-chat queue is stable.
 

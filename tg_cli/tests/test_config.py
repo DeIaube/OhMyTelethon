@@ -180,6 +180,7 @@ def test_load_config_merges_daemon_defaults_with_file_values(tmp_path):
             'status_path': 'status.json',
             'poll_interval': '0.5',
             'task_ttl': 120,
+            'claim_ttl': 45,
             'max_pending': '3',
             'max_task_context': 5,
             'min_reply_interval': 7,
@@ -196,6 +197,7 @@ def test_load_config_merges_daemon_defaults_with_file_values(tmp_path):
     assert config.daemon['status_path'].name == 'status.json'
     assert config.daemon['poll_interval'] == 0.5
     assert config.daemon['task_ttl'] == 120.0
+    assert config.daemon['claim_ttl'] == 45.0
     assert config.daemon['max_pending'] == 3
     assert config.daemon['max_task_context'] == 5
     assert config.daemon['min_reply_interval'] == 7.0

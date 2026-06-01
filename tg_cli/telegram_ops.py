@@ -1080,22 +1080,28 @@ def _daemon_reply_counts(queue_path, chat_id, now=None):
     queue = daemon_store.load_queue(queue_path)
     hourly = 0
     consecutive = 0
+    counting_consecutive = True
     for task in reversed(queue.get('tasks', [])):
         chat = task.get('chat') or {}
         if int(chat.get('id') or 0) != int(chat_id):
             continue
         status = task.get('status')
         updated_at = _daemon_parse_time(task.get('updated_at')) or now
-        if status == 'reply_pending':
+        if status in ('reply_pending', 'held_rate_limit'):
             continue
         if status == 'completed' and task.get('message_id') is not None:
             if (now - updated_at).total_seconds() <= 3600:
                 hourly += 1
-            consecutive += 1
+            if counting_consecutive:
+                consecutive += 1
             continue
-        if status in ('skipped', 'expired', 'pending'):
-            break
+        counting_consecutive = False
     return hourly, consecutive
+
+
+def _daemon_retry_after(seconds, now=None):
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    return now + _dt.timedelta(seconds=max(0.0, float(seconds or 0.0)))
 
 
 async def _daemon_send_reply_task(client, entity, config, row, task,
@@ -1154,10 +1160,19 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
 
     hourly, consecutive = _daemon_reply_counts(queue_path, row['id'])
     if hourly >= int(config.daemon['max_messages_per_hour']):
+        retry_after = _daemon_retry_after(60.0)
+        daemon_store.hold_rate_limited_task(
+            queue_path, task['id'], reason='hourly_limit',
+            retry_after=retry_after)
         emit('Queued reply {} held: hourly daemon limit reached.'.format(
             task['id']))
         return last_sent_at
     if consecutive >= int(config.daemon['max_consecutive_replies']):
+        retry_after = _daemon_retry_after(
+            max(1.0, float(config.daemon['min_reply_interval'])))
+        daemon_store.hold_rate_limited_task(
+            queue_path, task['id'], reason='consecutive_limit',
+            retry_after=retry_after)
         emit('Queued reply {} held: consecutive daemon limit reached.'.format(
             task['id']))
         return last_sent_at
@@ -1323,7 +1338,8 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
                 emit('Daemon stopping: stop requested.')
                 break
 
-            for task in daemon_store.reply_pending_tasks(queue_path, row['id']):
+            for task in daemon_store.reply_pending_tasks(
+                    queue_path, row['id'], task_ttl=daemon_config['task_ttl']):
                 last_sent_at = await _daemon_send_reply_task(
                     client, entity, config, row, task, last_sent_at,
                     dry_run, emit)

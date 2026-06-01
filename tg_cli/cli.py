@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import copy
 import json
+import os
 import sqlite3
 import sys
 
@@ -198,6 +199,9 @@ def build_parser():
 
     daemon_next = daemon_sub.add_parser(
         'next', help='Print the next pending daemon task.')
+    daemon_next.add_argument(
+        '--peek', action='store_true',
+        help='Read without claiming a task lease.')
     daemon_next.add_argument('--json', action='store_true')
 
     daemon_reply = daemon_sub.add_parser(
@@ -391,9 +395,16 @@ async def _cmd_daemon(args, config):
         return
 
     if args.daemon_command == 'next':
-        task = daemon_store.next_pending_task(
-            queue_path,
-            task_ttl=config.daemon['task_ttl'])
+        if args.peek:
+            task = daemon_store.next_pending_task(
+                queue_path,
+                task_ttl=config.daemon['task_ttl'])
+        else:
+            task = daemon_store.claim_next_task(
+                queue_path,
+                task_ttl=config.daemon['task_ttl'],
+                claim_ttl=config.daemon['claim_ttl'],
+                owner='tg-cli:{}'.format(os.getpid()))
         if args.json:
             print(dumps_json(task))
         elif task is None:
@@ -415,9 +426,9 @@ async def _cmd_daemon(args, config):
         task = _find_task(config, args.task_id)
         if task is None:
             raise TelegramCliError('Daemon task not found: {}'.format(args.task_id))
-        if task.get('status') != 'pending':
+        if task.get('status') not in ('pending', 'claimed'):
             raise TelegramCliError(
-                'Daemon task {} is not pending; status={}.'.format(
+                'Daemon task {} is not pending or claimed; status={}.'.format(
                     args.task_id, task.get('status')))
         text = (args.text or '').strip()
         if not text:
@@ -440,8 +451,8 @@ async def _cmd_daemon(args, config):
                 task_config, 'daemon_reply', chat_id,
                 chat_title=chat.get('title'), text=text,
                 dry_run=True, status='dry_run')
-            result = daemon_store.complete_task(
-                queue_path, args.task_id, dry_run=True)
+            result = copy.deepcopy(task)
+            result['dry_run_checked'] = True
             payload = {'queued': False, 'dry_run': True, 'task': result}
         else:
             safety.audit_record(

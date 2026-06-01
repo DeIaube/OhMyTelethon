@@ -76,6 +76,18 @@ def test_append_task_respects_max_pending(tmp_path):
     assert [task['id'] for task in queue['tasks']] == [first['id']]
 
 
+def test_append_task_counts_reply_pending_as_active(tmp_path):
+    queue_path = tmp_path / 'queue.json'
+    first = make_task(now='2026-06-01T00:00:00+00:00')
+    second = make_task(now='2026-06-01T00:00:01+00:00')
+
+    assert daemon.append_task(queue_path, first, max_pending=1) is True
+    daemon.queue_reply_task(queue_path, first['id'], '来了')
+
+    assert daemon.append_task(queue_path, second, max_pending=1) is False
+    assert daemon.queue_counts(queue_path) == {'reply_pending': 1}
+
+
 def test_append_task_serializes_read_modify_write(tmp_path, monkeypatch):
     queue_path = tmp_path / 'queue.json'
     first = make_task(now='2026-06-01T00:00:00+00:00')
@@ -161,6 +173,48 @@ def test_next_pending_task_uses_created_at_not_file_order(tmp_path):
     assert pending['id'] == older_task['id']
 
 
+def test_claim_next_task_leases_oldest_pending_task(tmp_path):
+    queue_path = tmp_path / 'queue.json'
+    first = make_task(now='2026-06-01T00:00:00+00:00')
+    second = make_task(now='2026-06-01T00:00:01+00:00')
+    daemon.append_task(queue_path, first)
+    daemon.append_task(queue_path, second)
+
+    claimed = daemon.claim_next_task(
+        queue_path,
+        now='2026-06-01T00:00:10+00:00',
+        claim_ttl=60,
+        owner='agent-a')
+
+    assert claimed['id'] == first['id']
+    assert claimed['status'] == 'claimed'
+    assert claimed['claim_owner'] == 'agent-a'
+    assert claimed['claim_expires_at'] == '2026-06-01T00:01:10+00:00'
+    assert daemon.next_pending_task(
+        queue_path,
+        now='2026-06-01T00:00:20+00:00')['id'] == second['id']
+
+
+def test_claim_next_task_releases_expired_claims(tmp_path):
+    queue_path = tmp_path / 'queue.json'
+    task = make_task(now='2026-06-01T00:00:00+00:00')
+    daemon.append_task(queue_path, task)
+    daemon.claim_next_task(
+        queue_path,
+        now='2026-06-01T00:00:10+00:00',
+        claim_ttl=30,
+        owner='agent-a')
+
+    reclaimed = daemon.claim_next_task(
+        queue_path,
+        now='2026-06-01T00:00:41+00:00',
+        claim_ttl=30,
+        owner='agent-b')
+
+    assert reclaimed['id'] == task['id']
+    assert reclaimed['claim_owner'] == 'agent-b'
+
+
 def test_skip_and_complete_only_change_pending_tasks(tmp_path):
     queue_path = tmp_path / 'queue.json'
     skipped_task = make_task(now='2026-06-01T00:00:00+00:00')
@@ -190,6 +244,7 @@ def test_queue_reply_and_complete_reply_pending_task(tmp_path):
     assert queued['status'] == 'reply_pending'
     assert queued['reply_text'] == '短回复'
     assert queued['reply_dry_run'] is False
+    assert 'reply_queued_at' in queued
     assert daemon.next_pending_task(queue_path) is None
     assert [item['id'] for item in daemon.reply_pending_tasks(queue_path)] == [
         task['id']]
@@ -202,6 +257,49 @@ def test_queue_reply_and_complete_reply_pending_task(tmp_path):
     assert completed['status'] == 'completed'
     assert completed['message_id'] == 9
     assert daemon.reply_pending_tasks(queue_path) == []
+
+
+def test_reply_pending_tasks_expire_stale_replies(tmp_path):
+    queue_path = tmp_path / 'queue.json'
+    task = make_task(now='2026-06-01T00:00:00+00:00')
+    daemon.append_task(queue_path, task)
+    daemon.queue_reply_task(
+        queue_path, task['id'], '短回复',
+        now='2026-06-01T00:01:00+00:00')
+
+    assert daemon.reply_pending_tasks(
+        queue_path,
+        now='2026-06-01T00:02:01+00:00',
+        task_ttl=60) == []
+    saved = daemon.get_task(queue_path, task['id'])
+    assert saved['status'] == 'expired'
+
+
+def test_held_rate_limited_task_waits_until_retry_after(tmp_path):
+    queue_path = tmp_path / 'queue.json'
+    task = make_task(now='2026-06-01T00:00:00+00:00')
+    daemon.append_task(queue_path, task)
+    daemon.queue_reply_task(
+        queue_path, task['id'], '短回复',
+        now='2026-06-01T00:01:00+00:00')
+    held = daemon.hold_rate_limited_task(
+        queue_path, task['id'], reason='hourly_limit',
+        retry_after='2026-06-01T00:03:00+00:00',
+        now='2026-06-01T00:02:00+00:00')
+
+    assert held['status'] == 'held_rate_limit'
+    assert daemon.reply_pending_tasks(
+        queue_path,
+        now='2026-06-01T00:02:30+00:00') == []
+
+    due = daemon.reply_pending_tasks(
+        queue_path,
+        now='2026-06-01T00:03:00+00:00')
+
+    assert [item['id'] for item in due] == [task['id']]
+    saved = daemon.get_task(queue_path, task['id'])
+    assert saved['status'] == 'reply_pending'
+    assert 'retry_after' not in saved
 
 
 def test_status_stop_flag_lifecycle(tmp_path):

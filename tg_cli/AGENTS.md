@@ -7,6 +7,7 @@ Default local CLI config, state, and audit files also live under `tg_cli/` and a
 - `tg_cli/.tg-cli.json`
 - `tg_cli/.tg-cli-state.json`
 - `tg_cli/.tg-cli-daemon-queue.json`
+- `tg_cli/.tg-cli-daemon-queue.json.lock`
 - `tg_cli/.tg-cli-daemon-status.json`
 - `tg_cli/.tg-cli-daemon.lock`
 - `tg_cli/tg-cli.audit.log`
@@ -30,8 +31,9 @@ Current capabilities:
 - `tg-cli game round <chat> --split-long-replies`: split long typed replies into several safe, audited Telegram messages.
 - `game round` prints a structured report at exit with elapsed time, received batch/message counts, prompted count, sent reply/message ids, skip reasons, average reply length, and initiative prompt/send/skip counts.
 - `tg-cli daemon run <chat> --preset chat_social --duration 3600 --dry-run`: run the v0.4 foreground daemon for one whitelisted chat and write local queue/status/lock state.
-- `tg-cli daemon next [--json]`: read the next pending daemon task for Codex, Claude, or another external operator.
-- `tg-cli daemon reply <task_id> "..." [--dry-run] [--json]`: validate and queue one pending daemon task reply; the running daemon process sends queued replies from the active Telethon session.
+- `tg-cli daemon next [--json]`: claim the next pending daemon task for Codex, Claude, or another external operator.
+- `tg-cli daemon next --peek [--json]`: inspect the next pending daemon task without claiming it.
+- `tg-cli daemon reply <task_id> "..." [--dry-run] [--json]`: validate and queue one claimed or pending daemon task reply; the running daemon process sends queued replies from the active Telethon session. `--dry-run` validates and audits without consuming the task.
 - `tg-cli daemon skip <task_id> [--reason TEXT] [--json]`: complete one pending daemon task without sending.
 - `tg-cli daemon status [--json]`: inspect daemon queue, lock, pause, and rate-limit state.
 - `tg-cli daemon stop`: request the foreground daemon to stop cleanly.
@@ -41,11 +43,11 @@ Profile config:
 - `profile.style`, `profile.language`, `profile.max_chars`, `profile.emoji_level`, `profile.avoid_topics`, `profile.forbidden_terms`, and legacy `profile.reply_policy` have safe defaults in `tg_cli.config`.
 - Social Policy docs and examples should use top-level `persona`, `reply_policy`, and `initiative` objects. `persona` describes who the account sounds like, `reply_policy` describes how to take or skip replies, and `initiative` describes how to open a topic proactively. These are guidance fields, not permission grants.
 - `round.*` has defaults in `tg_cli.config`; command flags should override config values only when explicitly passed.
-- `daemon.*` has defaults in `tg_cli.config`. Keep `queue_path`, `lock_path`, and `status_path` local ignored files by default. `poll_interval`, `task_ttl`, `max_pending`, `max_task_context`, `min_reply_interval`, `max_messages_per_hour`, and `max_consecutive_replies` are safety and queue controls, not prompt guidance.
+- `daemon.*` has defaults in `tg_cli.config`. Keep `queue_path`, `lock_path`, and `status_path` local ignored files by default. `poll_interval`, `task_ttl`, `claim_ttl`, `max_pending`, `max_task_context`, `min_reply_interval`, `max_messages_per_hour`, and `max_consecutive_replies` are safety and queue controls, not prompt guidance.
 - Top-level `presets` can contain named `profile`, `persona`, `reply_policy`, `initiative`, and `round` overlays. `game suggest` and `game round` select them with `--preset NAME`; command flags still override preset round values. Social Policy examples should keep normal/social initiative as explicit presets such as `chat_normal` and `chat_social`, with default initiative off or low-frequency.
 - `game suggest` must include the selected preset name, the full resolved `profile`, `persona`, `reply_policy`, `initiative`, and the selected operator name.
 - `game round` must show resolved profile, persona, reply policy, and initiative guidance before asking the operator for a reply.
-- `daemon next` task payloads must be usable by Codex/Claude without model-provider coupling. The CLI owns Telegram IO and local queue state only; external operators decide reply/skip.
+- `daemon next` task payloads must be usable by Codex/Claude without model-provider coupling. The command claims a lease by default; use `--peek` only for read-only inspection. The CLI owns Telegram IO and local queue state only; external operators decide reply/skip.
 
 Safety rules:
 
@@ -60,7 +62,7 @@ Safety rules:
 - Long reply splitting must keep every message part inside the same write safety checks and audit behavior.
 - Keep daemon behavior single-chat and foreground-only for v0.4. Do not add multi-group hosting, background system services, web UI, or model API calls in this scope.
 - Keep daemon single-instance lock behavior strict. `daemon run` must refuse to start when an active lock exists, and queue/status/lock files must stay ignored.
-- Keep daemon replies behind `allowed_chats`, global `pause`, forbidden-term checks, queue audit, `daemon.min_reply_interval`, `daemon.max_messages_per_hour`, `daemon.max_consecutive_replies`, and final send audit logging.
+- Keep daemon replies behind `allowed_chats`, global `pause`, forbidden-term checks, queue audit, `daemon.min_reply_interval`, `daemon.max_messages_per_hour`, `daemon.max_consecutive_replies`, stale queued-reply expiration, held rate-limit retry state, and final send audit logging.
 - Keep `daemon next`, `daemon reply`, `daemon skip`, and `daemon status` machine-readable with `--json`.
 - Audit logs must not store raw message text, API hash, phone number, or session bytes.
 - Avoid concurrent `tg-cli` commands on the same Telethon session file during live rounds; the session is SQLite-backed and single-writer behavior can lock concurrent commands.

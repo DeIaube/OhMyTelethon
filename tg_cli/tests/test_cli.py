@@ -363,6 +363,8 @@ def test_daemon_next_skip_and_reply_queue_lifecycle(tmp_path, monkeypatch, capsy
     cli._run(cli._cmd_daemon(next_args, config))
     next_payload = json.loads(capsys.readouterr().out)
     assert next_payload['id'] == task['id']
+    assert next_payload['status'] == 'claimed'
+    assert 'claim_expires_at' in next_payload
 
     reply_args = cli.build_parser().parse_args([
         'daemon', 'reply', task['id'], '来了', '--json'])
@@ -379,3 +381,41 @@ def test_daemon_next_skip_and_reply_queue_lifecycle(tmp_path, monkeypatch, capsy
     assert skip_payload['skipped'] is True
     assert skip_payload['task']['status'] == 'skipped'
     assert skip_payload['task']['reason'] == 'changed'
+
+
+def test_daemon_reply_dry_run_does_not_consume_task(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        daemon_config={
+            'queue_path': str(tmp_path / 'queue.json'),
+            'lock_path': str(tmp_path / 'daemon.lock'),
+            'status_path': str(tmp_path / 'status.json'),
+            'task_ttl': 3600,
+        })
+    task = cli.daemon_store.create_task(
+        chat={'id': 5217114569, 'title': 'test chat'},
+        messages=[{'id': 1, 'sender': 'p1', 'text': '在吗'}],
+        profile={'style': 'brief'},
+        persona={},
+        reply_policy={},
+        initiative={},
+        preset='chat_social',
+        prompt='Reply if useful.')
+    cli.daemon_store.append_task(config.daemon['queue_path'], task)
+
+    reply_args = cli.build_parser().parse_args([
+        'daemon', 'reply', task['id'], '来了', '--dry-run', '--json'])
+    cli._run(cli._cmd_daemon(reply_args, config))
+
+    reply_payload = json.loads(capsys.readouterr().out)
+    assert reply_payload['queued'] is False
+    assert reply_payload['dry_run'] is True
+    assert reply_payload['task']['dry_run_checked'] is True
+    saved = cli.daemon_store.get_task(config.daemon['queue_path'], task['id'])
+    assert saved['status'] == 'pending'

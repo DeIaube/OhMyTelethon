@@ -267,6 +267,35 @@ def test_daemon_reply_counts_ignore_current_reply_pending_task(tmp_path):
             2, 2)
 
 
+def test_daemon_reply_counts_hourly_ignores_pending_breaks(tmp_path):
+    queue_path = tmp_path / 'queue.json'
+    completed = daemon.create_task(
+        chat={'id': 5217114569, 'title': 'chat'},
+        messages=[],
+        profile={},
+        persona={},
+        reply_policy={},
+        initiative={},
+        now='2026-06-01T00:00:00+00:00')
+    pending = daemon.create_task(
+        chat={'id': 5217114569, 'title': 'chat'},
+        messages=[],
+        profile={},
+        persona={},
+        reply_policy={},
+        initiative={},
+        now='2026-06-01T00:00:30+00:00')
+    daemon.append_task(queue_path, completed)
+    daemon.complete_task(queue_path, completed['id'], message_id=1)
+    daemon.append_task(queue_path, pending)
+
+    assert telegram_ops._daemon_reply_counts(
+        queue_path,
+        5217114569,
+        now=telegram_ops._daemon_parse_time('2026-06-01T00:01:00+00:00')) == (
+            1, 0)
+
+
 def test_daemon_send_reply_rechecks_stop_after_rate_limit_sleep(
         tmp_path, monkeypatch):
     config = make_config(tmp_path)
@@ -308,6 +337,56 @@ def test_daemon_send_reply_rechecks_stop_after_rate_limit_sleep(
     assert sent_texts == []
     saved = daemon.get_task(config.daemon['queue_path'], task['id'])
     assert saved['status'] == 'reply_pending'
+
+
+def test_daemon_send_reply_holds_task_when_hourly_limit_reached(tmp_path):
+    config = make_config(tmp_path)
+    config.daemon['max_messages_per_hour'] = 1
+    completed = daemon.create_task(
+        chat={'id': 5217114569, 'title': 'chat'},
+        messages=[],
+        profile={},
+        persona={},
+        reply_policy={},
+        initiative={},
+        now='2026-06-01T00:00:00+00:00')
+    pending = daemon.create_task(
+        chat={'id': 5217114569, 'title': 'chat'},
+        messages=[],
+        profile={},
+        persona={},
+        reply_policy={},
+        initiative={},
+        now='2026-06-01T00:00:01+00:00')
+    daemon.append_task(config.daemon['queue_path'], completed)
+    daemon.complete_task(config.daemon['queue_path'], completed['id'], message_id=1)
+    daemon.append_task(config.daemon['queue_path'], pending)
+    queued = daemon.queue_reply_task(
+        config.daemon['queue_path'], pending['id'], '来了')
+    sent_texts = []
+
+    class FakeClient:
+        async def send_message(self, entity, text):
+            sent_texts.append((entity, text))
+            return SimpleNamespace(id=77)
+
+    async def run():
+        return await telegram_ops._daemon_send_reply_task(
+            FakeClient(),
+            entity='entity',
+            config=config,
+            row={'id': 5217114569, 'title': 'chat'},
+            task=queued,
+            last_sent_at=None,
+            dry_run=False,
+            emit=lambda text='': None)
+
+    assert asyncio.run(run()) is None
+    assert sent_texts == []
+    saved = daemon.get_task(config.daemon['queue_path'], pending['id'])
+    assert saved['status'] == 'held_rate_limit'
+    assert saved['rate_limit_reason'] == 'hourly_limit'
+    assert 'retry_after' in saved
 
 
 def test_daemon_run_releases_lock_when_client_start_fails(tmp_path, monkeypatch):
