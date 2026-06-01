@@ -7,10 +7,11 @@ import sys
 
 from . import __version__
 from .config import ConfigError, load_config, normalize_round
+from . import daemon as daemon_store
 from . import safety
 from .safety import SafetyError
 from .telegram_ops import (
-    TelegramCliError, codex_context, dumps_json, get_me, history,
+    TelegramCliError, codex_context, daemon_run, dumps_json, get_me, history,
     interactive_round, list_dialogs, observe, send_text,
 )
 
@@ -181,6 +182,45 @@ def build_parser():
         '--split-long-replies', action='store_true', default=None,
         help='Split long typed replies into multiple Telegram messages using round config.')
 
+    daemon = sub.add_parser('daemon', help='Long-running local task queue commands.')
+    daemon_sub = daemon.add_subparsers(dest='daemon_command', required=True)
+
+    daemon_run_cmd = daemon_sub.add_parser(
+        'run', help='Run one foreground daemon for one chat.')
+    daemon_run_cmd.add_argument('chat')
+    daemon_run_cmd.add_argument('--preset', help='Named preset from config.presets.')
+    daemon_run_cmd.add_argument(
+        '--duration', type=float, default=3600.0,
+        help='Stop after this many seconds. Default: 3600.')
+    daemon_run_cmd.add_argument(
+        '--dry-run', action='store_true',
+        help='Create local tasks but do not send queued replies.')
+
+    daemon_next = daemon_sub.add_parser(
+        'next', help='Print the next pending daemon task.')
+    daemon_next.add_argument('--json', action='store_true')
+
+    daemon_reply = daemon_sub.add_parser(
+        'reply', help='Queue a reply for the running daemon to send.')
+    daemon_reply.add_argument('task_id')
+    daemon_reply.add_argument('text')
+    daemon_reply.add_argument(
+        '--dry-run', action='store_true',
+        help='Validate and audit without queueing a real send.')
+    daemon_reply.add_argument('--json', action='store_true')
+
+    daemon_skip = daemon_sub.add_parser(
+        'skip', help='Skip a pending daemon task.')
+    daemon_skip.add_argument('task_id')
+    daemon_skip.add_argument('--reason', default='skipped')
+    daemon_skip.add_argument('--json', action='store_true')
+
+    daemon_status = daemon_sub.add_parser(
+        'status', help='Show daemon queue and lock status.')
+    daemon_status.add_argument('--json', action='store_true')
+
+    daemon_sub.add_parser('stop', help='Ask the foreground daemon to stop.')
+
     return parser
 
 
@@ -292,6 +332,165 @@ async def _cmd_game(args, config):
     raise AssertionError(args.game_command)
 
 
+def _daemon_path(config, name):
+    return config.daemon['{}_path'.format(name)]
+
+
+def _find_task(config, task_id):
+    queue = daemon_store.load_queue(_daemon_path(config, 'queue'))
+    for task in queue.get('tasks', []):
+        if task.get('id') == task_id:
+            return task
+    return None
+
+
+def _config_for_task(config, task):
+    task_config = copy.copy(config)
+    task_config.profile = task.get('profile') or getattr(config, 'profile', {})
+    task_config.persona = task.get('persona') or getattr(config, 'persona', {})
+    task_config.reply_policy = (
+        task.get('reply_policy') or getattr(config, 'reply_policy', {}))
+    task_config.initiative = (
+        task.get('initiative') or getattr(config, 'initiative', {}))
+    return task_config
+
+
+def _daemon_status_payload(config):
+    status = daemon_store.read_status(_daemon_path(config, 'status'))
+    counts = daemon_store.queue_counts(_daemon_path(config, 'queue'))
+    lock_path = _daemon_path(config, 'lock')
+    return {
+        'paused': bool(safety.load_state(config).get('paused')),
+        'running': bool(status.get('running')),
+        'stop_requested': bool(status.get('stop_requested')),
+        'status': status,
+        'queue_counts': counts,
+        'queue_path': str(_daemon_path(config, 'queue')),
+        'lock_path': str(lock_path),
+        'status_path': str(_daemon_path(config, 'status')),
+        'locked': lock_path.is_file(),
+    }
+
+
+async def _cmd_daemon(args, config):
+    queue_path = _daemon_path(config, 'queue')
+    status_path = _daemon_path(config, 'status')
+
+    if args.daemon_command == 'run':
+        profile = _resolve_profile(config, args.preset)
+        reply_policy = _resolve_reply_policy(config, args.preset)
+        initiative = _resolve_initiative(config, args.preset)
+        persona = _resolve_persona(config, args.preset)
+        round_config = _resolve_round(config, args.preset)
+        daemon_config = _copy_config_with_game_settings(
+            config, profile, round_config, reply_policy=reply_policy,
+            initiative=initiative, persona=persona, preset_name=args.preset)
+        await daemon_run(
+            daemon_config, args.chat, preset=args.preset,
+            duration=args.duration, dry_run=args.dry_run)
+        return
+
+    if args.daemon_command == 'next':
+        task = daemon_store.next_pending_task(
+            queue_path,
+            task_ttl=config.daemon['task_ttl'])
+        if args.json:
+            print(dumps_json(task))
+        elif task is None:
+            print('No pending daemon task.')
+        else:
+            print('Task: {id} kind={kind} chat={title} preset={preset}'.format(
+                id=task['id'],
+                kind=task.get('kind'),
+                title=(task.get('chat') or {}).get('title'),
+                preset=task.get('preset') or 'default'))
+            print('Prompt:')
+            print(task.get('prompt') or '')
+            print('Messages:')
+            for item in task.get('messages') or []:
+                print('- [{id}] {sender}: {text}'.format(**item))
+        return
+
+    if args.daemon_command == 'reply':
+        task = _find_task(config, args.task_id)
+        if task is None:
+            raise TelegramCliError('Daemon task not found: {}'.format(args.task_id))
+        if task.get('status') != 'pending':
+            raise TelegramCliError(
+                'Daemon task {} is not pending; status={}.'.format(
+                    args.task_id, task.get('status')))
+        text = (args.text or '').strip()
+        if not text:
+            raise TelegramCliError('Reply text must not be empty.')
+        task_config = _config_for_task(config, task)
+        chat = task.get('chat') or {}
+        chat_id = chat.get('id')
+        safety.require_can_write(task_config, chat_id)
+        matches = safety.find_forbidden_terms(task_config, text)
+        if matches:
+            safety.audit_record(
+                task_config, 'daemon_reply', chat_id,
+                chat_title=chat.get('title'), text=text,
+                dry_run=args.dry_run, status='blocked_forbidden_terms')
+            raise safety.SafetyError(
+                'Message contains forbidden/sensitive profile term(s): {}.'.format(
+                    ', '.join(matches)))
+        if args.dry_run:
+            safety.audit_record(
+                task_config, 'daemon_reply', chat_id,
+                chat_title=chat.get('title'), text=text,
+                dry_run=True, status='dry_run')
+            result = daemon_store.complete_task(
+                queue_path, args.task_id, dry_run=True)
+            payload = {'queued': False, 'dry_run': True, 'task': result}
+        else:
+            safety.audit_record(
+                task_config, 'daemon_reply', chat_id,
+                chat_title=chat.get('title'), text=text,
+                status='queued')
+            result = daemon_store.queue_reply_task(queue_path, args.task_id, text)
+            payload = {'queued': True, 'dry_run': False, 'task': result}
+        if args.json:
+            print(dumps_json(payload))
+        elif payload['queued']:
+            print('Queued daemon reply for task {}.'.format(args.task_id))
+        else:
+            print('DRY-RUN daemon reply accepted for task {}.'.format(args.task_id))
+        return
+
+    if args.daemon_command == 'skip':
+        task = daemon_store.skip_task(queue_path, args.task_id, reason=args.reason)
+        if task is None:
+            raise TelegramCliError(
+                'Daemon task not found or not skippable: {}'.format(args.task_id))
+        if args.json:
+            print(dumps_json({'skipped': True, 'task': task}))
+        else:
+            print('Skipped daemon task {}.'.format(args.task_id))
+        return
+
+    if args.daemon_command == 'status':
+        data = _daemon_status_payload(config)
+        if args.json:
+            print(dumps_json(data))
+        else:
+            print('running={}'.format(str(data['running']).lower()))
+            print('locked={}'.format(str(data['locked']).lower()))
+            print('paused={}'.format(str(data['paused']).lower()))
+            print('stop_requested={}'.format(
+                str(data['stop_requested']).lower()))
+            print('queue_counts={}'.format(
+                json.dumps(data['queue_counts'], sort_keys=True)))
+        return
+
+    if args.daemon_command == 'stop':
+        daemon_store.request_stop(status_path)
+        print('Stop requested.')
+        return
+
+    raise AssertionError(args.daemon_command)
+
+
 def _status_payload(config):
     state = safety.load_state(config)
     return {
@@ -307,7 +506,9 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     telegram_commands = {'me', 'groups', 'dialogs', 'history', 'send', 'game'}
-    require_credentials = args.command in telegram_commands
+    require_credentials = (
+        args.command in telegram_commands
+        or (args.command == 'daemon' and args.daemon_command == 'run'))
 
     try:
         config = load_config(args.config, require_credentials=require_credentials)
@@ -341,10 +542,12 @@ def main(argv=None):
             _run(_cmd_send(args, config))
         elif args.command == 'game':
             _run(_cmd_game(args, config))
+        elif args.command == 'daemon':
+            _run(_cmd_daemon(args, config))
         else:
             parser.error('unknown command {}'.format(args.command))
         return 0
-    except (ConfigError, SafetyError, TelegramCliError) as exc:
+    except (ConfigError, SafetyError, TelegramCliError, daemon_store.DaemonLockError) as exc:
         print('error: {}'.format(exc), file=sys.stderr)
         return 2
     except sqlite3.OperationalError as exc:

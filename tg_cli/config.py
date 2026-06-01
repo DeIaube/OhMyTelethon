@@ -39,6 +39,21 @@ DEFAULT_ROUND = {
 }
 
 
+DEFAULT_DAEMON = {
+    'queue_path': None,
+    'lock_path': None,
+    'status_path': None,
+    'poll_interval': 1.0,
+    'task_ttl': 900.0,
+    'max_pending': 20,
+    'max_task_context': 8,
+    'min_reply_interval': 6.0,
+    'max_messages_per_hour': 20,
+    'max_consecutive_replies': 2,
+    'stale_lock_after': 3600.0,
+}
+
+
 DEFAULT_REPLY_POLICY = {
     'group_type': 'group',
     'reply_threshold': 0.6,
@@ -192,6 +207,41 @@ def normalize_round(round_config=None):
         raise ConfigError('round.split_delay_max must be greater than or equal to split_delay_min.')
     normalized['split_max_parts'] = _int_field(
         normalized, 'split_max_parts', minimum=1)
+    return normalized
+
+
+def normalize_daemon(daemon_config=None):
+    if daemon_config in (None, ''):
+        daemon_config = {}
+    if not isinstance(daemon_config, dict):
+        raise ConfigError('daemon must contain a JSON object.')
+
+    normalized = dict(DEFAULT_DAEMON)
+    normalized.update(daemon_config)
+    for field_name in ('queue_path', 'lock_path', 'status_path'):
+        value = normalized.get(field_name)
+        if value in (None, ''):
+            normalized[field_name] = None
+        elif not isinstance(value, str):
+            raise ConfigError('daemon.{} must be a string.'.format(field_name))
+    for field_name in (
+            'poll_interval', 'task_ttl', 'min_reply_interval',
+            'stale_lock_after'):
+        value = float(normalized.get(field_name))
+        if value < 0.0:
+            raise ConfigError(
+                'daemon.{} must be greater than or equal to 0.'.format(
+                    field_name))
+        normalized[field_name] = value
+    for field_name in (
+            'max_pending', 'max_task_context',
+            'max_messages_per_hour', 'max_consecutive_replies'):
+        value = int(normalized.get(field_name))
+        if value < 1:
+            raise ConfigError(
+                'daemon.{} must be greater than or equal to 1.'.format(
+                    field_name))
+        normalized[field_name] = value
     return normalized
 
 
@@ -515,7 +565,8 @@ class AppConfig:
             self, api_id=None, api_hash=None, session_path=None,
             allowed_chats=None, state_path=None, audit_log_path=None,
             profile=None, round_config=None, presets=None, config_path=None,
-            reply_policy=None, initiative=None, persona=None):
+            reply_policy=None, initiative=None, persona=None,
+            daemon_config=None):
         self.api_id = api_id
         self.api_hash = api_hash
         self.session_path = Path(session_path).expanduser().resolve()
@@ -524,6 +575,11 @@ class AppConfig:
         self.audit_log_path = Path(audit_log_path).expanduser().resolve()
         self.profile = normalize_profile(profile)
         self.round = normalize_round(round_config)
+        self.daemon = normalize_daemon(daemon_config)
+        for field_name in ('queue_path', 'lock_path', 'status_path'):
+            if self.daemon.get(field_name) is not None:
+                self.daemon[field_name] = (
+                    Path(self.daemon[field_name]).expanduser().resolve())
         self.reply_policy = normalize_reply_policy(reply_policy)
         self.initiative = normalize_initiative(initiative)
         self.persona = normalize_persona(persona)
@@ -671,6 +727,16 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
         or data.get('audit_log_path')
         or str(base / 'tg_cli' / 'tg-cli.audit.log')
     )
+    daemon_config = dict(data.get('daemon') or {})
+    daemon_config.setdefault(
+        'queue_path',
+        str(base / 'tg_cli' / '.tg-cli-daemon-queue.json'))
+    daemon_config.setdefault(
+        'lock_path',
+        str(base / 'tg_cli' / '.tg-cli-daemon.lock'))
+    daemon_config.setdefault(
+        'status_path',
+        str(base / 'tg_cli' / '.tg-cli-daemon-status.json'))
 
     cfg = AppConfig(
         api_id=api_id,
@@ -686,6 +752,7 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
         reply_policy=data.get('reply_policy'),
         initiative=data.get('initiative'),
         persona=data.get('persona'),
+        daemon_config=daemon_config,
     )
     if require_credentials:
         cfg.require_credentials()

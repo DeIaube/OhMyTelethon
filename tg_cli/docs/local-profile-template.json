@@ -1,5 +1,17 @@
 {
   "allowed_chats": [1234567890],
+  "daemon": {
+    "queue_path": ".tg-cli-daemon-queue.json",
+    "lock_path": ".tg-cli-daemon.lock",
+    "status_path": ".tg-cli-daemon-status.json",
+    "poll_interval": 1,
+    "task_ttl": 900,
+    "max_pending": 20,
+    "max_task_context": 8,
+    "min_reply_interval": 6,
+    "max_messages_per_hour": 20,
+    "max_consecutive_replies": 2
+  },
   "profile": {
     "style": "低调、自然、简短，像普通群聊，不要长篇解释；可以轻微调侃，但别太用力。",
     "language": "中文",

@@ -3,9 +3,9 @@ import json
 import pytest
 
 from tg_cli.config import (
-    DEFAULT_INITIATIVE, DEFAULT_PERSONA, DEFAULT_PROFILE,
+    DEFAULT_DAEMON, DEFAULT_INITIATIVE, DEFAULT_PERSONA, DEFAULT_PROFILE,
     DEFAULT_REPLY_POLICY, DEFAULT_ROUND, ConfigError, load_config,
-    normalize_chat_id, normalize_round, parse_chat_ids,
+    normalize_chat_id, normalize_daemon, normalize_round, parse_chat_ids,
 )
 
 
@@ -60,6 +60,15 @@ def test_load_config_supplies_profile_defaults_when_omitted(tmp_path):
 
     assert config.profile == DEFAULT_PROFILE
     assert config.round == DEFAULT_ROUND
+    assert config.daemon['poll_interval'] == DEFAULT_DAEMON['poll_interval']
+    assert config.daemon['task_ttl'] == DEFAULT_DAEMON['task_ttl']
+    assert config.daemon['max_pending'] == DEFAULT_DAEMON['max_pending']
+    assert config.daemon['queue_path'] == (
+        tmp_path / 'tg_cli' / '.tg-cli-daemon-queue.json').resolve()
+    assert config.daemon['lock_path'] == (
+        tmp_path / 'tg_cli' / '.tg-cli-daemon.lock').resolve()
+    assert config.daemon['status_path'] == (
+        tmp_path / 'tg_cli' / '.tg-cli-daemon-status.json').resolve()
     assert config.reply_policy == DEFAULT_REPLY_POLICY
     assert config.initiative == DEFAULT_INITIATIVE
     assert config.persona == DEFAULT_PERSONA
@@ -160,6 +169,39 @@ def test_load_config_merges_round_defaults_with_file_values(tmp_path):
     assert config.round['split_long_replies'] is True
     assert config.round['split_max_chars'] == 24
     assert config.round['max_replies'] == DEFAULT_ROUND['max_replies']
+
+
+def test_load_config_merges_daemon_defaults_with_file_values(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'daemon': {
+            'queue_path': 'queue.json',
+            'lock_path': 'daemon.lock',
+            'status_path': 'status.json',
+            'poll_interval': '0.5',
+            'task_ttl': 120,
+            'max_pending': '3',
+            'max_task_context': 5,
+            'min_reply_interval': 7,
+            'max_messages_per_hour': 9,
+            'max_consecutive_replies': 2,
+            'stale_lock_after': 30,
+        },
+    }), encoding='utf-8')
+
+    config = load_config(config_path, env={}, cwd=tmp_path)
+
+    assert config.daemon['queue_path'].name == 'queue.json'
+    assert config.daemon['lock_path'].name == 'daemon.lock'
+    assert config.daemon['status_path'].name == 'status.json'
+    assert config.daemon['poll_interval'] == 0.5
+    assert config.daemon['task_ttl'] == 120.0
+    assert config.daemon['max_pending'] == 3
+    assert config.daemon['max_task_context'] == 5
+    assert config.daemon['min_reply_interval'] == 7.0
+    assert config.daemon['max_messages_per_hour'] == 9
+    assert config.daemon['max_consecutive_replies'] == 2
+    assert config.daemon['stale_lock_after'] == 30.0
 
 
 def test_load_config_presets_resolve_over_global_profile_and_round(tmp_path):
@@ -400,3 +442,12 @@ def test_load_config_rejects_invalid_social_policy_values_with_paths(tmp_path):
 def test_normalize_round_rejects_invalid_probability():
     with pytest.raises(ConfigError):
         normalize_round({'reply_probability': 1.2})
+
+
+def test_normalize_daemon_rejects_invalid_values():
+    with pytest.raises(ConfigError, match='daemon.max_pending'):
+        normalize_daemon({'max_pending': 0})
+    with pytest.raises(ConfigError, match='daemon.poll_interval'):
+        normalize_daemon({'poll_interval': -1})
+    with pytest.raises(ConfigError, match='daemon.queue_path'):
+        normalize_daemon({'queue_path': 123})

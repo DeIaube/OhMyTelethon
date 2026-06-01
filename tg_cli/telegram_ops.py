@@ -1,6 +1,8 @@
 import asyncio
+import copy
 import datetime as _dt
 import json
+import os
 import random
 import string
 
@@ -8,6 +10,7 @@ from telethon import TelegramClient, events, utils
 from telethon.tl.types import Channel, Chat, User
 
 from .config import normalize_chat_id
+from . import daemon as daemon_store
 from . import safety
 
 
@@ -1043,6 +1046,318 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
         return report
     finally:
         await client.disconnect()
+
+
+def _daemon_task_prompt(profile, persona, reply_policy):
+    return _round_instruction(profile, persona, reply_policy)
+
+
+def _task_config(base_config, task):
+    task_config = copy.copy(base_config)
+    task_config.profile = task.get('profile') or getattr(base_config, 'profile', {})
+    task_config.persona = task.get('persona') or getattr(base_config, 'persona', {})
+    task_config.reply_policy = (
+        task.get('reply_policy') or getattr(base_config, 'reply_policy', {}))
+    task_config.initiative = (
+        task.get('initiative') or getattr(base_config, 'initiative', {}))
+    return task_config
+
+
+def _daemon_parse_time(value):
+    if value in (None, ''):
+        return None
+    text = str(value)
+    if text.endswith('Z'):
+        text = text[:-1] + '+00:00'
+    parsed = _dt.datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return parsed.astimezone(_dt.timezone.utc)
+
+
+def _daemon_reply_counts(queue_path, chat_id, now=None):
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    queue = daemon_store.load_queue(queue_path)
+    hourly = 0
+    consecutive = 0
+    for task in reversed(queue.get('tasks', [])):
+        chat = task.get('chat') or {}
+        if int(chat.get('id') or 0) != int(chat_id):
+            continue
+        status = task.get('status')
+        updated_at = _daemon_parse_time(task.get('updated_at')) or now
+        if status == 'reply_pending':
+            continue
+        if status == 'completed' and task.get('message_id') is not None:
+            if (now - updated_at).total_seconds() <= 3600:
+                hourly += 1
+            consecutive += 1
+            continue
+        if status in ('skipped', 'expired', 'pending'):
+            break
+    return hourly, consecutive
+
+
+async def _daemon_send_reply_task(client, entity, config, row, task,
+                                  last_sent_at, dry_run, emit):
+    queue_path = config.daemon['queue_path']
+    reply = (task.get('reply_text') or '').strip()
+    if not reply:
+        daemon_store.skip_task(queue_path, task['id'], reason='empty_reply')
+        return last_sent_at
+
+    task_config = _task_config(config, task)
+    safety.require_can_write(task_config, row['id'])
+    matches = safety.find_forbidden_terms(task_config, reply)
+    if matches:
+        safety.audit_record(
+            task_config, 'daemon_reply_send', row['id'],
+            chat_title=row['title'], text=reply,
+            dry_run=bool(dry_run or task.get('reply_dry_run')),
+            status='blocked_forbidden_terms')
+        daemon_store.skip_task(
+            queue_path, task['id'], reason='forbidden_terms')
+        emit('Skipped queued reply {}: forbidden terms.'.format(task['id']))
+        return last_sent_at
+
+    now = asyncio.get_running_loop().time()
+    delay = safety.reply_interval_delay(
+        now, last_sent_at, config.daemon['min_reply_interval'])
+    if delay > 0:
+        emit('Daemon rate limit: waiting {:.1f}s before send.'.format(delay))
+        await asyncio.sleep(delay)
+
+    hourly, consecutive = _daemon_reply_counts(queue_path, row['id'])
+    if hourly >= int(config.daemon['max_messages_per_hour']):
+        emit('Queued reply {} held: hourly daemon limit reached.'.format(
+            task['id']))
+        return last_sent_at
+    if consecutive >= int(config.daemon['max_consecutive_replies']):
+        emit('Queued reply {} held: consecutive daemon limit reached.'.format(
+            task['id']))
+        return last_sent_at
+
+    if dry_run or task.get('reply_dry_run'):
+        safety.audit_record(
+            task_config, 'daemon_reply_send', row['id'],
+            chat_title=row['title'], text=reply, dry_run=True,
+            status='dry_run')
+        daemon_store.complete_task(queue_path, task['id'], dry_run=True)
+        emit('DRY-RUN queued reply task={}'.format(task['id']))
+        return last_sent_at
+
+    sent = await client.send_message(entity, reply)
+    last_sent_at = asyncio.get_running_loop().time()
+    safety.audit_record(
+        task_config, 'daemon_reply_send', row['id'],
+        chat_title=row['title'], text=reply, message_id=sent.id,
+        status='sent')
+    daemon_store.complete_task(
+        queue_path, task['id'], message_id=sent.id, dry_run=False)
+    emit('SENT queued reply task={} message_id={}'.format(
+        task['id'], sent.id))
+    return last_sent_at
+
+
+async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
+                     output_func=print):
+    config.require_credentials()
+
+    def emit(text=''):
+        _emit(output_func, text)
+
+    profile = getattr(config, 'profile', {}) or {}
+    persona = getattr(config, 'persona', {}) or {}
+    reply_policy = getattr(config, 'reply_policy', {}) or {}
+    initiative = getattr(config, 'initiative', {}) or {}
+    round_config = getattr(config, 'round', {}) or {}
+    daemon_config = getattr(config, 'daemon', {}) or {}
+    queue_path = daemon_config['queue_path']
+    lock_path = daemon_config['lock_path']
+    status_path = daemon_config['status_path']
+    owner = 'tg-cli-daemon:{}'.format(os.getpid())
+    lock = daemon_store.acquire_lock(
+        lock_path, owner=owner,
+        stale_after=daemon_config.get('stale_lock_after', 3600.0))
+    daemon_store.clear_stop(status_path)
+
+    client = _client(config)
+    await client.start()
+    queue = asyncio.Queue()
+    seen_ids = set()
+    last_sent_at = None
+
+    def update_status(row=None, running=True):
+        current = daemon_store.read_status(status_path)
+        payload = {
+            'running': bool(running),
+            'pid': os.getpid(),
+            'owner': owner,
+            'preset': preset or None,
+            'dry_run': bool(dry_run),
+            'lock': lock,
+            'queue_counts': daemon_store.queue_counts(queue_path),
+        }
+        if row is not None or 'chat' not in current:
+            payload['chat'] = row
+        current.update(payload)
+        daemon_store.write_status(status_path, current)
+
+    try:
+        me = await client.get_me()
+        me_names = _mention_names(me)
+        entity, row = await resolve_chat(client, chat)
+        safety.require_allowed_chat(config, row['id'])
+        update_status(row=row, running=True)
+        emit(
+            'Daemon started: {} (id={}) duration={}s preset={} dry_run={}.'.format(
+                row['title'], row['id'], duration, preset or 'default',
+                str(bool(dry_run)).lower()))
+
+        @client.on(events.NewMessage(chats=entity))
+        async def handler(event):
+            if not _remember_inbound_message(seen_ids, event.message.id):
+                return
+            if event.sender_id == me.id:
+                return
+            await queue.put(event)
+
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        end_at = started_at + float(duration)
+        last_activity_at = started_at
+        last_initiative_at = None
+        initiative_starts = 0
+        recent_event_times = []
+
+        async def append_context_task(kind, prompt, messages):
+            task = daemon_store.create_task(
+                chat=row,
+                messages=messages[-int(daemon_config['max_task_context']):],
+                profile=profile,
+                persona=persona,
+                reply_policy=reply_policy,
+                initiative=initiative,
+                preset=preset,
+                kind=kind,
+                prompt=prompt)
+            task['dry_run'] = bool(dry_run)
+            appended = daemon_store.append_task(
+                queue_path, task,
+                max_pending=daemon_config['max_pending'])
+            if appended:
+                emit('Queued daemon task id={} kind={}.'.format(
+                    task['id'], kind))
+            else:
+                emit('Skipped daemon task: max_pending reached.')
+            return appended
+
+        def initiative_due(now):
+            if not initiative or not initiative.get('enabled'):
+                return None
+            if initiative_starts >= int(initiative.get('max_starts') or 0):
+                return None
+            due_at = last_activity_at + float(initiative.get('idle_after') or 0.0)
+            if last_initiative_at is not None:
+                due_at = max(
+                    due_at,
+                    last_initiative_at + float(initiative.get('cooldown') or 0.0))
+            return max(0.0, due_at - now)
+
+        async def maybe_queue_initiative(now):
+            nonlocal initiative_starts, last_initiative_at
+            recent_window = float(initiative.get('recent_window') or 300.0)
+            active_threshold = int(initiative.get('active_threshold') or 0)
+            recent_count = len([
+                item for item in recent_event_times
+                if item >= now - recent_window])
+            if initiative.get('avoid_when_active', True) and active_threshold > 0:
+                if recent_count >= active_threshold:
+                    last_initiative_at = now
+                    return
+            recent_context = await _recent_context_lines(
+                client, entity, min(round_config.get('limit', 12),
+                                    daemon_config['max_task_context']))
+            prompt = _initiative_instruction(
+                profile, persona, reply_policy, initiative,
+                preset=preset, idle_seconds=now - last_activity_at,
+                recent_messages=recent_context)
+            initiative_starts += 1
+            last_initiative_at = now
+            await append_context_task('initiative', prompt, recent_context)
+
+        while True:
+            now = loop.time()
+            if now >= end_at:
+                break
+            if daemon_store.stop_requested(status_path):
+                emit('Daemon stopping: stop requested.')
+                break
+
+            for task in daemon_store.reply_pending_tasks(queue_path, row['id']):
+                last_sent_at = await _daemon_send_reply_task(
+                    client, entity, config, row, task, last_sent_at,
+                    dry_run, emit)
+                update_status(row=row, running=True)
+
+            wait_timeout = min(
+                float(daemon_config['poll_interval']),
+                max(0.0, end_at - now))
+            initiative_wait = initiative_due(now)
+            if initiative_wait == 0.0:
+                await maybe_queue_initiative(now)
+                update_status(row=row, running=True)
+                continue
+            if initiative_wait is not None:
+                wait_timeout = min(wait_timeout, initiative_wait)
+
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=wait_timeout)
+            except asyncio.TimeoutError:
+                update_status(row=row, running=True)
+                continue
+
+            events_batch = await _collect_merged_events(
+                queue, event, round_config.get('merge_window', 0.0), end_at, loop)
+            last_activity_at = loop.time()
+            recent_event_times.extend([last_activity_at] * len(events_batch))
+            combined_text = []
+            incoming_lines = []
+            for item_event in events_batch:
+                sender = await item_event.get_sender()
+                sender_name = (
+                    utils.get_display_name(sender)
+                    if sender else str(item_event.sender_id))
+                text = item_event.message.message or ''
+                combined_text.append(text)
+                incoming_lines.append((item_event.message.id, sender_name, text))
+
+            should_prompt, reason = _should_prompt_for_text(
+                '\n'.join(combined_text),
+                reply_probability=round_config.get('reply_probability', 1.0),
+                mention_reply_probability=round_config.get(
+                    'mention_reply_probability'),
+                mentions_me=_mentions_me('\n'.join(combined_text), me_names),
+                skip_short_ack=round_config.get('skip_short_ack', False))
+            if not should_prompt:
+                emit('Skipped daemon task: {}.'.format(reason))
+                update_status(row=row, running=True)
+                continue
+
+            recent_context = await _recent_context_lines(
+                client, entity, min(round_config.get('limit', 12),
+                                    daemon_config['max_task_context']))
+            prompt = _daemon_task_prompt(profile, persona, reply_policy)
+            await append_context_task('message', prompt, recent_context)
+            update_status(row=row, running=True)
+
+        emit('Daemon finished.')
+    finally:
+        try:
+            update_status(running=False)
+        finally:
+            await client.disconnect()
+            daemon_store.release_lock(lock_path, owner=owner)
 
 
 async def codex_context(config, chat, limit, operator='agent', preset=None):

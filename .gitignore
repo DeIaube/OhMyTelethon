@@ -12,6 +12,9 @@
 # Local tg-cli state and secrets
 .tg-cli.json
 .tg-cli-state.json
+.tg-cli-daemon-queue.json
+.tg-cli-daemon-status.json
+.tg-cli-daemon.lock
 tg-cli.audit.log
 
 # Builds and testing

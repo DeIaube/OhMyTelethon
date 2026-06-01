@@ -96,6 +96,38 @@ def test_game_round_parser_defaults():
     assert args.split_long_replies is None
 
 
+def test_daemon_parser_accepts_queue_commands():
+    parser = cli.build_parser()
+
+    run_args = parser.parse_args([
+        'daemon', 'run', '5217114569',
+        '--preset', 'chat_social',
+        '--duration', '30',
+        '--dry-run',
+    ])
+    next_args = parser.parse_args(['daemon', 'next', '--json'])
+    reply_args = parser.parse_args([
+        'daemon', 'reply', 'task-1', '短回复', '--dry-run', '--json'])
+    skip_args = parser.parse_args([
+        'daemon', 'skip', 'task-1', '--reason', 'unclear', '--json'])
+
+    assert run_args.command == 'daemon'
+    assert run_args.daemon_command == 'run'
+    assert run_args.chat == '5217114569'
+    assert run_args.preset == 'chat_social'
+    assert run_args.duration == 30.0
+    assert run_args.dry_run is True
+    assert next_args.daemon_command == 'next'
+    assert next_args.json is True
+    assert reply_args.daemon_command == 'reply'
+    assert reply_args.task_id == 'task-1'
+    assert reply_args.text == '短回复'
+    assert reply_args.dry_run is True
+    assert reply_args.json is True
+    assert skip_args.daemon_command == 'skip'
+    assert skip_args.reason == 'unclear'
+
+
 def test_game_suggest_parser_accepts_operator():
     parser = cli.build_parser()
 
@@ -285,3 +317,65 @@ def test_game_suggest_json_applies_preset(monkeypatch, tmp_path, capsys):
     assert data['operator'] == 'codex'
     assert data['preset'] == 'casual'
     assert data['profile']['style'] == 'casual style'
+
+
+def test_daemon_status_json_does_not_require_credentials(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    code = cli.main(['daemon', 'status', '--json'])
+
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data['paused'] is False
+    assert data['running'] is False
+    assert data['queue_counts'] == {}
+    assert data['queue_path'].endswith('tg_cli/.tg-cli-daemon-queue.json')
+    assert data['lock_path'].endswith('tg_cli/.tg-cli-daemon.lock')
+
+
+def test_daemon_next_skip_and_reply_queue_lifecycle(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        daemon_config={
+            'queue_path': str(tmp_path / 'queue.json'),
+            'lock_path': str(tmp_path / 'daemon.lock'),
+            'status_path': str(tmp_path / 'status.json'),
+            'task_ttl': 3600,
+        })
+    task = cli.daemon_store.create_task(
+        chat={'id': 5217114569, 'title': 'test chat'},
+        messages=[{'id': 1, 'sender': 'p1', 'text': '在吗'}],
+        profile={'style': 'brief'},
+        persona={},
+        reply_policy={},
+        initiative={},
+        preset='chat_social',
+        prompt='Reply if useful.')
+    cli.daemon_store.append_task(config.daemon['queue_path'], task)
+
+    next_args = cli.build_parser().parse_args(['daemon', 'next', '--json'])
+    cli._run(cli._cmd_daemon(next_args, config))
+    next_payload = json.loads(capsys.readouterr().out)
+    assert next_payload['id'] == task['id']
+
+    reply_args = cli.build_parser().parse_args([
+        'daemon', 'reply', task['id'], '来了', '--json'])
+    cli._run(cli._cmd_daemon(reply_args, config))
+    reply_payload = json.loads(capsys.readouterr().out)
+    assert reply_payload['queued'] is True
+    assert reply_payload['task']['status'] == 'reply_pending'
+    assert reply_payload['task']['reply_text'] == '来了'
+
+    skip_args = cli.build_parser().parse_args([
+        'daemon', 'skip', task['id'], '--reason', 'changed', '--json'])
+    cli._run(cli._cmd_daemon(skip_args, config))
+    skip_payload = json.loads(capsys.readouterr().out)
+    assert skip_payload['skipped'] is True
+    assert skip_payload['task']['status'] == 'skipped'
+    assert skip_payload['task']['reason'] == 'changed'

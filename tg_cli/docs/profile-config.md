@@ -16,6 +16,18 @@ Default initiative should stay off or low-frequency. More active behavior belong
 ```json
 {
   "allowed_chats": [1234567890],
+  "daemon": {
+    "queue_path": ".tg-cli-daemon-queue.json",
+    "lock_path": ".tg-cli-daemon.lock",
+    "status_path": ".tg-cli-daemon-status.json",
+    "poll_interval": 1,
+    "task_ttl": 900,
+    "max_pending": 20,
+    "max_task_context": 8,
+    "min_reply_interval": 6,
+    "max_messages_per_hour": 20,
+    "max_consecutive_replies": 2
+  },
   "profile": {
     "style": "自然、简短、像普通群聊，不要长篇解释。",
     "language": "中文",
@@ -87,9 +99,20 @@ For a credential-free starter file, see `tg_cli/docs/local-profile-template.json
 - `initiative.avoid_when_active`: Skip proactive starts if the group is already active.
 - `initiative.active_threshold`: Number of recent inbound messages that counts as active.
 - `initiative.recent_window`: Window in seconds used with `active_threshold`.
+- `initiative.topic_sources`: Context sources used when deciding proactive prompts.
 - `initiative.topics`: Optional low-risk topic seeds.
 - `initiative.allowed_intents`: Allowed proactive intent labels.
 - `initiative.forbidden_topics`: Topic labels the operator should avoid.
+- `daemon.queue_path`: Local JSON queue file for pending daemon tasks. This should stay ignored by git.
+- `daemon.lock_path`: Local single-instance lock file used by `daemon run`. This should stay ignored by git.
+- `daemon.status_path`: Local status file for daemon state and heartbeat. This should stay ignored by git.
+- `daemon.poll_interval`: Seconds between daemon polling/status ticks.
+- `daemon.task_ttl`: Seconds before a pending task is considered stale.
+- `daemon.max_pending`: Maximum queued pending tasks before new prompts are skipped or delayed.
+- `daemon.max_task_context`: Maximum recent messages included in each queued task.
+- `daemon.min_reply_interval`: Minimum seconds between successful daemon replies.
+- `daemon.max_messages_per_hour`: Per-daemon hourly outbound message cap.
+- `daemon.max_consecutive_replies`: Maximum consecutive account replies before another inbound message is required.
 
 Unknown extra keys are preserved in `game suggest --json`, so operator-specific hints can be added without breaking older versions.
 
@@ -128,6 +151,45 @@ Merge order is deterministic:
 - Explicit `game round` command flags, such as `--duration` or `--max-replies`.
 
 Unknown preset names fail before the command starts with a message listing available presets.
+
+## Daemon Config
+
+Daemon config is top-level and not part of `presets`. Use presets to choose `profile`, `persona`, `reply_policy`, `initiative`, and `round`; use `daemon` to control local queue files and long-running safety limits.
+
+The expected v0.4 daemon commands are:
+
+```sh
+tg-cli daemon run 5217114569 --preset chat_social --duration 3600 --dry-run
+tg-cli daemon next
+tg-cli daemon next --json
+tg-cli daemon reply <task_id> "这把先看看队友怎么说" --dry-run
+tg-cli daemon reply <task_id> "这把先看看队友怎么说" --json
+tg-cli daemon skip <task_id> --reason "unclear context"
+tg-cli daemon skip <task_id> --reason "unclear context" --json
+tg-cli daemon status
+tg-cli daemon status --json
+tg-cli daemon stop
+```
+
+`daemon run` is a foreground single-chat process. It listens to one whitelisted chat, writes local pending tasks, updates status, and holds a single-instance lock. It does not call Codex, Claude, OpenAI, Anthropic, or any other model provider.
+
+Codex/Claude operate the queue with `daemon next`, `daemon reply`, and `daemon skip`. A queued task should contain enough bounded context for the external operator to decide whether to reply naturally. `daemon reply` validates and queues the reply; the foreground `daemon run` process sends queued replies from the active Telethon session. This avoids opening Telegram from a second process while the daemon owns the session.
+
+Default local daemon files:
+
+- `.tg-cli-daemon-queue.json`
+- `.tg-cli-daemon-status.json`
+- `.tg-cli-daemon.lock`
+
+These files are state, not source. Keep them ignored, do not commit them, and do not treat queue content as a durable database.
+
+v0.4 non-goals:
+
+- Multi-group hosting.
+- Automatic model API calls.
+- Background launchd/system service setup.
+- Web UI.
+- Unlimited or unaudited sending.
 
 ## Prompt Behavior
 
@@ -169,6 +231,8 @@ Before any outbound text reaches `client.send_message`, the CLI checks `profile.
 Audit records store text hashes and lengths, not raw message text.
 
 Social Policy guidance does not bypass safety. Active or social presets still pass the same `allowed_chats` whitelist, global `pause`, forbidden-term checks, round rate limits, audit logging, and final round report.
+
+Daemon guidance also does not bypass safety. `daemon reply` must pass whitelist, `pause`, forbidden-term checks, and queue audit before a reply can be queued. The running daemon enforces daemon-specific `min_reply_interval`, `max_messages_per_hour`, `max_consecutive_replies`, and final send audit before the reply reaches Telegram.
 
 ## Round Options
 

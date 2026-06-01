@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from tg_cli.config import AppConfig
+from tg_cli import daemon
 from tg_cli import telegram_ops
 import pytest
 
@@ -216,6 +217,46 @@ def test_format_persona_guidance_renders_style_notes_cleanly():
 
     assert 'style_notes=像随手回一句' in guidance
     assert "['像随手回一句']" not in guidance
+
+
+def test_daemon_reply_counts_ignore_current_reply_pending_task(tmp_path):
+    queue_path = tmp_path / 'queue.json'
+    first = daemon.create_task(
+        chat={'id': 5217114569, 'title': 'chat'},
+        messages=[],
+        profile={},
+        persona={},
+        reply_policy={},
+        initiative={},
+        now='2026-06-01T00:00:00+00:00')
+    second = daemon.create_task(
+        chat={'id': 5217114569, 'title': 'chat'},
+        messages=[],
+        profile={},
+        persona={},
+        reply_policy={},
+        initiative={},
+        now='2026-06-01T00:00:01+00:00')
+    third = daemon.create_task(
+        chat={'id': 5217114569, 'title': 'chat'},
+        messages=[],
+        profile={},
+        persona={},
+        reply_policy={},
+        initiative={},
+        now='2026-06-01T00:00:02+00:00')
+    daemon.append_task(queue_path, first)
+    daemon.complete_task(queue_path, first['id'], message_id=1)
+    daemon.append_task(queue_path, second)
+    daemon.complete_task(queue_path, second['id'], message_id=2)
+    daemon.append_task(queue_path, third)
+    daemon.queue_reply_task(queue_path, third['id'], '来了')
+
+    assert telegram_ops._daemon_reply_counts(
+        queue_path,
+        5217114569,
+        now=telegram_ops._daemon_parse_time('2026-06-01T00:01:00+00:00')) == (
+            2, 2)
 
 
 def test_round_report_tracks_and_formats_summary():
