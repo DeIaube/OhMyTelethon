@@ -55,7 +55,7 @@ Audit records continue to store text hashes and lengths, not raw message text.
 
 ## Round Safety Options
 
-`game round` adds local timing controls:
+`game round` adds local timing controls. These can be passed as command flags or configured under `round` in `tg_cli/.tg-cli.json`.
 
 ```sh
 tg-cli game round 5217114569 --duration 60 --max-replies 8 \
@@ -96,3 +96,49 @@ tg-cli game round 5217114569 --duration 120 --max-replies 8 \
   --random-delay-min 1 --random-delay-max 4 \
   --skip-short-ack --merge-window 2
 ```
+
+Equivalent local config:
+
+```json
+{
+  "round": {
+    "duration": 120,
+    "max_replies": 8,
+    "quiet_context": true,
+    "min_reply_interval": 5,
+    "end_buffer": 8,
+    "reply_probability": 0.75,
+    "mention_reply_probability": 1,
+    "random_delay_min": 1,
+    "random_delay_max": 4,
+    "skip_short_ack": true,
+    "merge_window": 2,
+    "split_long_replies": true,
+    "split_max_chars": 28,
+    "split_delay_min": 1,
+    "split_delay_max": 2.5,
+    "split_max_parts": 3
+  }
+}
+```
+
+With this config, the normal command can be shortened:
+
+```sh
+tg-cli game round 5217114569
+```
+
+## Splitting Long Replies
+
+When `round.split_long_replies` is enabled, the Codex operator can type one longer reply and the CLI will split it into several Telegram messages. Splitting prefers punctuation boundaries, falls back to character length, and caps the number of parts with `round.split_max_parts`.
+
+Each split part still goes through:
+
+- `profile.forbidden_terms` / `profile.avoid_topics` filtering.
+- `end_buffer` checks before sending.
+- Audit logging with text hash and length only.
+
+Split timing:
+
+- `round.random_delay_min` / `round.random_delay_max` applies before the first sent part.
+- `round.split_delay_min` / `round.split_delay_max` applies between later parts.

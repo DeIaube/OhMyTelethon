@@ -3,8 +3,8 @@ import json
 import pytest
 
 from tg_cli.config import (
-    DEFAULT_PROFILE, ConfigError, load_config, normalize_chat_id,
-    parse_chat_ids,
+    DEFAULT_PROFILE, DEFAULT_ROUND, ConfigError, load_config, normalize_chat_id,
+    normalize_round, parse_chat_ids,
 )
 
 
@@ -58,6 +58,7 @@ def test_load_config_supplies_profile_defaults_when_omitted(tmp_path):
     config = load_config(env={}, cwd=tmp_path)
 
     assert config.profile == DEFAULT_PROFILE
+    assert config.round == DEFAULT_ROUND
 
 
 def test_load_config_merges_profile_defaults_with_file_values(tmp_path):
@@ -82,3 +83,30 @@ def test_load_config_merges_profile_defaults_with_file_values(tmp_path):
     assert config.profile['forbidden_terms'] == ['classified', 'internal']
     assert config.profile['reply_policy'] == DEFAULT_PROFILE['reply_policy']
     assert config.profile['custom_hint'] == 'keep it casual'
+
+
+def test_load_config_merges_round_defaults_with_file_values(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'round': {
+            'duration': 120,
+            'reply_probability': 0.8,
+            'quiet_context': True,
+            'split_long_replies': True,
+            'split_max_chars': 24,
+        },
+    }), encoding='utf-8')
+
+    config = load_config(config_path, env={}, cwd=tmp_path)
+
+    assert config.round['duration'] == 120.0
+    assert config.round['reply_probability'] == 0.8
+    assert config.round['quiet_context'] is True
+    assert config.round['split_long_replies'] is True
+    assert config.round['split_max_chars'] == 24
+    assert config.round['max_replies'] == DEFAULT_ROUND['max_replies']
+
+
+def test_normalize_round_rejects_invalid_probability():
+    with pytest.raises(ConfigError):
+        normalize_round({'reply_probability': 1.2})

@@ -120,3 +120,34 @@ def test_collect_merged_events_collects_until_window_expires():
         return [event.message.id for event in events]
 
     assert asyncio.run(run()) == [1, 2]
+
+
+def test_split_reply_text_prefers_punctuation_boundaries():
+    assert telegram_ops._split_reply_text(
+        '先这样吧，我一会儿再看。你先别急。', max_chars=12, max_parts=3) == [
+            '先这样吧，',
+            '我一会儿再看。',
+            '你先别急。',
+        ]
+
+
+def test_split_reply_text_caps_parts_by_merging_tail():
+    assert telegram_ops._split_reply_text(
+        '一二三四五六七八九十十一十二', max_chars=4, max_parts=2) == [
+            '一二三四',
+            '五六七八九十十一十二',
+        ]
+
+
+def test_round_reply_parts_respects_config(tmp_path):
+    config = make_config(tmp_path)
+    config.round['split_long_replies'] = False
+    assert telegram_ops._round_reply_parts(config, '一二三四五六') == ['一二三四五六']
+
+    config.round['split_long_replies'] = True
+    config.round['split_max_chars'] = 3
+    config.round['split_max_parts'] = 3
+    assert telegram_ops._round_reply_parts(config, '一二三四五六') == [
+        '一二三',
+        '四五六',
+    ]

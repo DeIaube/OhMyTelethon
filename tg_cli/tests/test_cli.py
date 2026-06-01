@@ -61,16 +61,18 @@ def test_game_round_parser_defaults():
     assert args.command == 'game'
     assert args.game_command == 'round'
     assert args.chat == '5217114569'
-    assert args.duration == 60
-    assert args.limit == 12
-    assert args.max_replies == 8
+    assert args.duration is None
+    assert args.limit is None
+    assert args.max_replies is None
     assert args.include_self is False
-    assert args.reply_probability == 1.0
+    assert args.reply_probability is None
     assert args.mention_reply_probability is None
-    assert args.random_delay_min == 0.0
-    assert args.random_delay_max == 0.0
-    assert args.skip_short_ack is False
-    assert args.merge_window == 0.0
+    assert args.random_delay_min is None
+    assert args.random_delay_max is None
+    assert args.skip_short_ack is None
+    assert args.merge_window is None
+    assert args.quiet_context is None
+    assert args.split_long_replies is None
 
 
 def test_game_round_parser_humanization_flags():
@@ -92,9 +94,9 @@ def test_game_round_parser_humanization_flags():
     assert args.random_delay_max == 4.0
     assert args.skip_short_ack is True
     assert args.merge_window == 2.0
-    assert args.quiet_context is False
-    assert args.min_reply_interval == 2.0
-    assert args.end_buffer == 5.0
+    assert args.quiet_context is None
+    assert args.min_reply_interval is None
+    assert args.end_buffer is None
 
 
 def test_game_round_parser_accepts_operator_safety_flags():
@@ -110,3 +112,48 @@ def test_game_round_parser_accepts_operator_safety_flags():
     assert args.quiet_context is True
     assert args.min_reply_interval == 1.5
     assert args.end_buffer == 4.0
+
+
+def test_game_round_uses_config_defaults_when_flags_are_omitted(monkeypatch):
+    parser = cli.build_parser()
+    args = parser.parse_args(['game', 'round', '5217114569'])
+    seen = {}
+
+    async def fake_interactive_round(config, chat, **kwargs):
+        seen['config'] = config
+        seen['chat'] = chat
+        seen.update(kwargs)
+
+    monkeypatch.setattr(cli, 'interactive_round', fake_interactive_round)
+    config = SimpleNamespace(round={
+        'duration': 120.0,
+        'limit': 9,
+        'max_replies': 4,
+        'quiet_context': True,
+        'min_reply_interval': 6.0,
+        'end_buffer': 10.0,
+        'reply_probability': 0.8,
+        'mention_reply_probability': 1.0,
+        'random_delay_min': 1.0,
+        'random_delay_max': 3.0,
+        'skip_short_ack': True,
+        'merge_window': 2.0,
+        'split_long_replies': True,
+    })
+
+    cli._run(cli._cmd_game(args, config))
+
+    assert seen['chat'] == '5217114569'
+    assert seen['duration'] == 120.0
+    assert seen['limit'] == 9
+    assert seen['max_replies'] == 4
+    assert seen['quiet_context'] is True
+    assert seen['min_reply_interval'] == 6.0
+    assert seen['end_buffer'] == 10.0
+    assert seen['reply_probability'] == 0.8
+    assert seen['mention_reply_probability'] == 1.0
+    assert seen['random_delay_min'] == 1.0
+    assert seen['random_delay_max'] == 3.0
+    assert seen['skip_short_ack'] is True
+    assert seen['merge_window'] == 2.0
+    assert seen['split_long_replies'] is True

@@ -68,37 +68,40 @@ def build_parser():
 
     round_cmd = game_sub.add_parser('round', help='Run a bounded interactive Codex-operated chat round.')
     round_cmd.add_argument('chat')
-    round_cmd.add_argument('--duration', type=float, default=60)
-    round_cmd.add_argument('--limit', '-n', type=int, default=12)
-    round_cmd.add_argument('--max-replies', type=int, default=8)
+    round_cmd.add_argument('--duration', type=float)
+    round_cmd.add_argument('--limit', '-n', type=int)
+    round_cmd.add_argument('--max-replies', type=int)
     round_cmd.add_argument('--include-self', action='store_true')
     round_cmd.add_argument(
-        '--quiet-context', action='store_true',
+        '--quiet-context', action='store_true', default=None,
         help='Only print each incoming message and compact Codex instruction, not the repeated recent-context block.')
     round_cmd.add_argument(
-        '--min-reply-interval', type=float, default=2.0,
+        '--min-reply-interval', type=float,
         help='Minimum seconds between game round sends.')
     round_cmd.add_argument(
-        '--end-buffer', type=float, default=5.0,
+        '--end-buffer', type=float,
         help='Stop prompting when less than this many seconds remain.')
     round_cmd.add_argument(
-        '--reply-probability', type=float, default=1.0,
+        '--reply-probability', type=float,
         help='Probability of prompting for a reply to each inbound message or merged batch.')
     round_cmd.add_argument(
         '--mention-reply-probability', type=float,
         help='Override reply probability when inbound text appears to mention the logged-in account.')
     round_cmd.add_argument(
-        '--random-delay-min', type=float, default=0.0,
+        '--random-delay-min', type=float,
         help='Minimum human-like delay before sending a typed round reply.')
     round_cmd.add_argument(
-        '--random-delay-max', type=float, default=0.0,
+        '--random-delay-max', type=float,
         help='Maximum human-like delay before sending a typed round reply.')
     round_cmd.add_argument(
-        '--skip-short-ack', action='store_true',
+        '--skip-short-ack', action='store_true', default=None,
         help='Skip low-information acknowledgements such as 嗯, 哈哈, or 真的假的.')
     round_cmd.add_argument(
-        '--merge-window', type=float, default=0.0,
+        '--merge-window', type=float,
         help='Seconds to collect rapid consecutive inbound messages before one prompt.')
+    round_cmd.add_argument(
+        '--split-long-replies', action='store_true', default=None,
+        help='Split long typed replies into multiple Telegram messages using round config.')
 
     return parser
 
@@ -168,18 +171,48 @@ async def _cmd_game(args, config):
             print(data['instruction'])
         return
     if args.game_command == 'round':
+        round_config = config.round
         await interactive_round(
-            config, args.chat, duration=args.duration, limit=args.limit,
-            max_replies=args.max_replies, include_self=args.include_self,
-            quiet_context=args.quiet_context,
-            min_reply_interval=args.min_reply_interval,
-            end_buffer=args.end_buffer,
-            reply_probability=args.reply_probability,
-            mention_reply_probability=args.mention_reply_probability,
-            random_delay_min=args.random_delay_min,
-            random_delay_max=args.random_delay_max,
-            skip_short_ack=args.skip_short_ack,
-            merge_window=args.merge_window)
+            config, args.chat,
+            duration=args.duration if args.duration is not None else round_config['duration'],
+            limit=args.limit if args.limit is not None else round_config['limit'],
+            max_replies=args.max_replies if args.max_replies is not None else round_config['max_replies'],
+            include_self=args.include_self,
+            quiet_context=(
+                args.quiet_context if args.quiet_context is not None
+                else round_config['quiet_context']),
+            min_reply_interval=(
+                args.min_reply_interval
+                if args.min_reply_interval is not None
+                else round_config['min_reply_interval']),
+            end_buffer=(
+                args.end_buffer if args.end_buffer is not None
+                else round_config['end_buffer']),
+            reply_probability=(
+                args.reply_probability
+                if args.reply_probability is not None
+                else round_config['reply_probability']),
+            mention_reply_probability=(
+                args.mention_reply_probability
+                if args.mention_reply_probability is not None
+                else round_config['mention_reply_probability']),
+            random_delay_min=(
+                args.random_delay_min
+                if args.random_delay_min is not None
+                else round_config['random_delay_min']),
+            random_delay_max=(
+                args.random_delay_max
+                if args.random_delay_max is not None
+                else round_config['random_delay_max']),
+            skip_short_ack=(
+                args.skip_short_ack if args.skip_short_ack is not None
+                else round_config['skip_short_ack']),
+            merge_window=(
+                args.merge_window if args.merge_window is not None
+                else round_config['merge_window']),
+            split_long_replies=(
+                args.split_long_replies if args.split_long_replies is not None
+                else round_config['split_long_replies']))
         return
     raise AssertionError(args.game_command)
 

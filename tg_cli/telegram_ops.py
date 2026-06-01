@@ -170,6 +170,60 @@ def _random_reply_delay(delay_min, delay_max, random_func=None):
     return float(random_func(delay_min, delay_max))
 
 
+def _split_reply_text(text, max_chars=28, max_parts=3):
+    text = (text or '').strip()
+    if not text:
+        return []
+    max_chars = int(max_chars)
+    max_parts = int(max_parts)
+    if max_chars < 1:
+        raise TelegramCliError('split max chars must be greater than 0.')
+    if max_parts < 1:
+        raise TelegramCliError('split max parts must be greater than 0.')
+    if len(text) <= max_chars:
+        return [text]
+
+    parts = []
+    current = ''
+    split_chars = '。！？!?；;，,、\n'
+    for ch in text:
+        current += ch
+        if ch in split_chars or len(current) >= max_chars:
+            part = current.strip()
+            if part:
+                parts.append(part)
+            current = ''
+    if current.strip():
+        parts.append(current.strip())
+
+    merged = []
+    for part in parts:
+        if len(part) <= max_chars:
+            merged.append(part)
+            continue
+        for start in range(0, len(part), max_chars):
+            merged.append(part[start:start + max_chars])
+
+    if len(merged) <= max_parts:
+        return merged
+    head = merged[:max_parts - 1]
+    tail = ''.join(merged[max_parts - 1:]).strip()
+    if tail:
+        head.append(tail)
+    return head
+
+
+def _round_reply_parts(config, reply):
+    round_config = getattr(config, 'round', {}) or {}
+    if not round_config.get('split_long_replies'):
+        return [reply.strip()] if reply.strip() else []
+    return _split_reply_text(
+        reply,
+        max_chars=round_config.get('split_max_chars', 28),
+        max_parts=round_config.get('split_max_parts', 3),
+    )
+
+
 async def _collect_merged_events(queue, first_event, merge_window, end_at, loop):
     events_ = [first_event]
     merge_window = _validate_nonnegative(merge_window, 'merge window')
@@ -346,8 +400,11 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                             mention_reply_probability=None,
                             random_delay_min=0.0, random_delay_max=0.0,
                             skip_short_ack=False, merge_window=0.0,
+                            split_long_replies=None,
                             input_func=input, output_func=print):
     config.require_credentials()
+    if split_long_replies is not None:
+        config.round['split_long_replies'] = bool(split_long_replies)
     reply_probability = _validate_probability(reply_probability, 'reply probability')
     if mention_reply_probability is not None:
         mention_reply_probability = _validate_probability(
@@ -487,31 +544,70 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                     end_buffer))
                 continue
 
-            safety.require_text_allowed(config, reply)
+            reply_parts = _round_reply_parts(config, reply)
+            if not reply_parts:
+                output_func('Skipped.')
+                continue
 
-            random_delay = _random_reply_delay(random_delay_min, random_delay_max)
-            if random_delay > 0:
-                if safety.should_stop_for_end_buffer(
-                        loop.time() + random_delay, end_at, end_buffer):
+            sent_ids = []
+            for index, part in enumerate(reply_parts):
+                safety.require_text_allowed(config, part)
+
+                random_delay = (
+                    _random_reply_delay(random_delay_min, random_delay_max)
+                    if index == 0 else 0.0)
+                if random_delay > 0:
+                    if safety.should_stop_for_end_buffer(
+                            loop.time() + random_delay, end_at, end_buffer):
+                        safety.audit_record(
+                            config, 'game_round_send', row['id'],
+                            chat_title=row['title'], text=part,
+                            status='skipped_end_buffer')
+                        output_func(
+                            'Skipped: random delay would enter end_buffer={}s.'.format(
+                                end_buffer))
+                        break
+                    output_func('Human delay: waiting {:.1f}s before send.'.format(
+                        random_delay))
+                    await asyncio.sleep(random_delay)
+
+                if index > 0:
+                    split_delay = _random_reply_delay(
+                        config.round.get('split_delay_min', 1.0),
+                        config.round.get('split_delay_max', 2.5))
+                    if split_delay > 0:
+                        if safety.should_stop_for_end_buffer(
+                                loop.time() + split_delay, end_at, end_buffer):
+                            safety.audit_record(
+                                config, 'game_round_send', row['id'],
+                                chat_title=row['title'], text=part,
+                                status='skipped_end_buffer')
+                            output_func(
+                                'Skipped: split delay would enter end_buffer={}s.'.format(
+                                    end_buffer))
+                            break
+                        output_func('Split delay: waiting {:.1f}s.'.format(split_delay))
+                        await asyncio.sleep(split_delay)
+
+                if safety.should_stop_for_end_buffer(loop.time(), end_at, end_buffer):
                     safety.audit_record(
                         config, 'game_round_send', row['id'],
-                        chat_title=row['title'], text=reply,
+                        chat_title=row['title'], text=part,
                         status='skipped_end_buffer')
-                    output_func(
-                        'Skipped: random delay would enter end_buffer={}s.'.format(
-                            end_buffer))
-                    continue
-                output_func('Human delay: waiting {:.1f}s before send.'.format(
-                    random_delay))
-                await asyncio.sleep(random_delay)
+                    output_func('Skipped: remaining time is below end_buffer={}s.'.format(
+                        end_buffer))
+                    break
 
-            sent = await client.send_message(entity, reply)
-            last_sent_at = loop.time()
-            replies += 1
-            safety.audit_record(
-                config, 'game_round_send', row['id'], chat_title=row['title'],
-                text=reply, message_id=sent.id, status='sent')
-            output_func('SENT message_id={}'.format(sent.id))
+                sent = await client.send_message(entity, part)
+                last_sent_at = loop.time()
+                sent_ids.append(sent.id)
+                safety.audit_record(
+                    config, 'game_round_send', row['id'], chat_title=row['title'],
+                    text=part, message_id=sent.id, status='sent')
+                output_func('SENT message_id={}'.format(sent.id))
+
+            if sent_ids:
+                replies += 1
 
         output_func('Round finished. replies={}'.format(replies))
         return replies

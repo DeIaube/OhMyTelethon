@@ -18,6 +18,27 @@ DEFAULT_PROFILE = {
 }
 
 
+DEFAULT_ROUND = {
+    'duration': 60.0,
+    'limit': 12,
+    'max_replies': 8,
+    'quiet_context': False,
+    'min_reply_interval': 2.0,
+    'end_buffer': 5.0,
+    'reply_probability': 1.0,
+    'mention_reply_probability': None,
+    'random_delay_min': 0.0,
+    'random_delay_max': 0.0,
+    'skip_short_ack': False,
+    'merge_window': 0.0,
+    'split_long_replies': False,
+    'split_max_chars': 28,
+    'split_delay_min': 1.0,
+    'split_delay_max': 2.5,
+    'split_max_parts': 3,
+}
+
+
 def _string_list(value, field_name):
     if value in (None, ''):
         return []
@@ -57,11 +78,78 @@ def normalize_profile(profile=None):
     return normalized
 
 
+def _float_field(data, name, minimum=None, allow_none=False):
+    value = data.get(name)
+    if value is None and allow_none:
+        return None
+    value = float(value)
+    if minimum is not None and value < minimum:
+        raise ConfigError('round.{} must be greater than or equal to {}.'.format(
+            name, minimum))
+    return value
+
+
+def _int_field(data, name, minimum=None):
+    value = int(data.get(name))
+    if minimum is not None and value < minimum:
+        raise ConfigError('round.{} must be greater than or equal to {}.'.format(
+            name, minimum))
+    return value
+
+
+def _probability_field(data, name, allow_none=False):
+    value = _float_field(data, name, minimum=0.0, allow_none=allow_none)
+    if value is not None and value > 1.0:
+        raise ConfigError('round.{} must be between 0 and 1.'.format(name))
+    return value
+
+
+def normalize_round(round_config=None):
+    if round_config in (None, ''):
+        round_config = {}
+    if not isinstance(round_config, dict):
+        raise ConfigError('round must contain a JSON object.')
+
+    normalized = dict(DEFAULT_ROUND)
+    normalized.update(round_config)
+    normalized['duration'] = _float_field(normalized, 'duration', minimum=0.0)
+    normalized['limit'] = _int_field(normalized, 'limit', minimum=1)
+    normalized['max_replies'] = _int_field(normalized, 'max_replies', minimum=1)
+    normalized['quiet_context'] = bool(normalized.get('quiet_context'))
+    normalized['min_reply_interval'] = _float_field(
+        normalized, 'min_reply_interval', minimum=0.0)
+    normalized['end_buffer'] = _float_field(normalized, 'end_buffer', minimum=0.0)
+    normalized['reply_probability'] = _probability_field(
+        normalized, 'reply_probability')
+    normalized['mention_reply_probability'] = _probability_field(
+        normalized, 'mention_reply_probability', allow_none=True)
+    normalized['random_delay_min'] = _float_field(
+        normalized, 'random_delay_min', minimum=0.0)
+    normalized['random_delay_max'] = _float_field(
+        normalized, 'random_delay_max', minimum=0.0)
+    if normalized['random_delay_max'] < normalized['random_delay_min']:
+        raise ConfigError('round.random_delay_max must be greater than or equal to random_delay_min.')
+    normalized['skip_short_ack'] = bool(normalized.get('skip_short_ack'))
+    normalized['merge_window'] = _float_field(normalized, 'merge_window', minimum=0.0)
+    normalized['split_long_replies'] = bool(normalized.get('split_long_replies'))
+    normalized['split_max_chars'] = _int_field(
+        normalized, 'split_max_chars', minimum=1)
+    normalized['split_delay_min'] = _float_field(
+        normalized, 'split_delay_min', minimum=0.0)
+    normalized['split_delay_max'] = _float_field(
+        normalized, 'split_delay_max', minimum=0.0)
+    if normalized['split_delay_max'] < normalized['split_delay_min']:
+        raise ConfigError('round.split_delay_max must be greater than or equal to split_delay_min.')
+    normalized['split_max_parts'] = _int_field(
+        normalized, 'split_max_parts', minimum=1)
+    return normalized
+
+
 class AppConfig:
     def __init__(
             self, api_id=None, api_hash=None, session_path=None,
             allowed_chats=None, state_path=None, audit_log_path=None,
-            profile=None, config_path=None):
+            profile=None, round_config=None, config_path=None):
         self.api_id = api_id
         self.api_hash = api_hash
         self.session_path = Path(session_path).expanduser().resolve()
@@ -69,6 +157,7 @@ class AppConfig:
         self.state_path = Path(state_path).expanduser().resolve()
         self.audit_log_path = Path(audit_log_path).expanduser().resolve()
         self.profile = normalize_profile(profile)
+        self.round = normalize_round(round_config)
         self.config_path = Path(config_path).expanduser().resolve() if config_path else None
 
     def require_credentials(self):
@@ -173,6 +262,7 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
         state_path=state_path,
         audit_log_path=audit_log_path,
         profile=data.get('profile'),
+        round_config=data.get('round'),
         config_path=config_path,
     )
     if require_credentials:

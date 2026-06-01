@@ -13,5 +13,24 @@
     "avoid_topics": ["隐私", "账号信息"],
     "forbidden_terms": ["示例禁用词"],
     "reply_policy": "只在有明确可接话的内容时回复；不确定时跳过；不要编造事实或冒充他人；短句优先，偶尔调侃。"
+  },
+  "round": {
+    "duration": 120,
+    "limit": 12,
+    "max_replies": 8,
+    "quiet_context": true,
+    "min_reply_interval": 5,
+    "end_buffer": 8,
+    "reply_probability": 0.75,
+    "mention_reply_probability": 1,
+    "random_delay_min": 1,
+    "random_delay_max": 4,
+    "skip_short_ack": true,
+    "merge_window": 2,
+    "split_long_replies": true,
+    "split_max_chars": 28,
+    "split_delay_min": 1,
+    "split_delay_max": 2.5,
+    "split_max_parts": 3
   }
 }

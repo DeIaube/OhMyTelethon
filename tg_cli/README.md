@@ -22,6 +22,7 @@ Optional local config can live in `tg_cli/.tg-cli.json`. That file is ignored by
 
 Profile fields are optional and default to safe game-round guidance. See `tg_cli/docs/profile-config.md` for the full profile schema, prompt behavior, and local safety filtering rules.
 For a profile-only starter that contains no credentials, copy `tg_cli/docs/local-profile-template.json` into your local `tg_cli/.tg-cli.json` and add credentials through environment variables.
+Round behavior can also live in `tg_cli/.tg-cli.json`, so day-to-day runs can be as short as `tg-cli game round 5217114569`.
 
 ## Commands
 
@@ -43,6 +44,7 @@ tg-cli game round 5217114569 --duration 120 --quiet-context \
   --reply-probability 0.75 --mention-reply-probability 1 \
   --random-delay-min 1 --random-delay-max 4 \
   --skip-short-ack --merge-window 2
+tg-cli game round 5217114569 --split-long-replies
 ```
 
 `game suggest` does not call an LLM. It prints a Codex-ready context bundle with the full resolved profile. Codex decides the reply, then sends through `tg-cli send`.
@@ -59,6 +61,7 @@ Round operator flags:
 - `--random-delay-min/--random-delay-max SECONDS`: wait a random human-like delay before sending a typed reply.
 - `--skip-short-ack`: skip low-information acknowledgements such as `嗯`, `哈哈`, or `真的假的`.
 - `--merge-window SECONDS`: collect rapid consecutive inbound messages before prompting once.
+- `--split-long-replies`: split long typed replies into multiple Telegram messages using `round.split_*` config.
 
 ## Safety Rules
 
@@ -69,4 +72,5 @@ Round operator flags:
 - `profile.forbidden_terms` and `profile.avoid_topics` block outbound text before `client.send_message`.
 - `game round` rate-limits sends and stops prompting near the end of a bounded round.
 - `game round` can skip low-information messages, skip by probability, merge rapid messages, and delay sends without becoming a daemon or auto mode.
+- Long round replies can be split into several messages, with each part still passing forbidden-term checks and audit logging.
 - Audit logs store message hashes and lengths, not raw message text.
