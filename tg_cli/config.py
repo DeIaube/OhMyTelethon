@@ -36,6 +36,7 @@ DEFAULT_ROUND = {
     'random_delay_max': 0.0,
     'skip_short_ack': False,
     'merge_window': 0.0,
+    'min_reply_chars': 7,
     'split_long_replies': False,
     'split_max_chars': 28,
     'split_delay_min': 1.0,
@@ -55,7 +56,6 @@ DEFAULT_DAEMON = {
     'max_task_context': 8,
     'min_reply_interval': 6.0,
     'max_messages_per_hour': 20,
-    'max_consecutive_replies': 2,
     'stale_lock_after': 3600.0,
 }
 
@@ -69,6 +69,15 @@ DEFAULT_MEMORY = {
     'path': None,
     'enabled': False,
     'max_task_memories': 8,
+}
+
+
+DEFAULT_BAD_CASES = {
+    'enabled': True,
+    'path': None,
+    'max_records': 1000,
+    'max_task_bad_cases': 3,
+    'recent_days': 14,
 }
 
 
@@ -108,6 +117,9 @@ DEFAULT_INITIATIVE = {
     'avoid_when_active': True,
     'active_threshold': 3,
     'recent_window': 300.0,
+    'self_context_guard': True,
+    'self_context_recent': 6,
+    'self_context_max_trailing_own': 2,
     'topic_sources': ['recent_messages'],
     'topics': [],
     'allow_topic_shift': False,
@@ -220,6 +232,8 @@ def normalize_round(round_config=None):
         raise ConfigError('round.random_delay_max must be greater than or equal to random_delay_min.')
     normalized['skip_short_ack'] = bool(normalized.get('skip_short_ack'))
     normalized['merge_window'] = _float_field(normalized, 'merge_window', minimum=0.0)
+    normalized['min_reply_chars'] = _int_field(
+        normalized, 'min_reply_chars', minimum=0)
     normalized['split_long_replies'] = bool(normalized.get('split_long_replies'))
     normalized['split_max_chars'] = _int_field(
         normalized, 'split_max_chars', minimum=1)
@@ -242,6 +256,7 @@ def normalize_daemon(daemon_config=None):
 
     normalized = dict(DEFAULT_DAEMON)
     normalized.update(daemon_config)
+    normalized.pop('max_consecutive_replies', None)
     for field_name in ('queue_path', 'lock_path', 'status_path'):
         value = normalized.get(field_name)
         if value in (None, ''):
@@ -261,7 +276,7 @@ def normalize_daemon(daemon_config=None):
         normalized[field_name] = value
     for field_name in (
             'max_pending', 'max_task_context',
-            'max_messages_per_hour', 'max_consecutive_replies'):
+            'max_messages_per_hour'):
         value = int(normalized.get(field_name))
         if value < 1:
             raise ConfigError(
@@ -313,8 +328,36 @@ def normalize_memory(memory_config=None):
     return normalized
 
 
+def normalize_bad_cases(bad_cases_config=None):
+    bad_cases_config = _object_config(bad_cases_config, 'bad_cases')
+    normalized = dict(DEFAULT_BAD_CASES)
+    normalized.update(bad_cases_config)
+    normalized['enabled'] = bool(normalized.get('enabled'))
+    value = normalized.get('path')
+    if value in (None, ''):
+        normalized['path'] = None
+    elif isinstance(value, Path):
+        normalized['path'] = str(value)
+    elif not isinstance(value, str):
+        raise ConfigError('bad_cases.path must be a string.')
+    for field_name in ('max_records', 'max_task_bad_cases'):
+        value = int(normalized.get(field_name))
+        if value < 0:
+            raise ConfigError(
+                'bad_cases.{} must be greater than or equal to 0.'.format(
+                    field_name))
+        normalized[field_name] = value
+    recent_days = int(normalized.get('recent_days'))
+    if recent_days < 0:
+        raise ConfigError(
+            'bad_cases.recent_days must be greater than or equal to 0.')
+    normalized['recent_days'] = recent_days
+    return normalized
+
+
 def _normalize_daemon_overlay(daemon_config, preset_name):
     normalized = dict(daemon_config)
+    normalized.pop('max_consecutive_replies', None)
     for field_name in ('queue_path', 'lock_path', 'status_path'):
         if field_name in normalized:
             raise ConfigError(
@@ -332,7 +375,6 @@ def _normalize_daemon_overlay(daemon_config, preset_name):
         'max_pending': 1,
         'max_task_context': 1,
         'max_messages_per_hour': 1,
-        'max_consecutive_replies': 1,
     }
     for field_name, minimum in float_fields.items():
         if field_name in normalized:
@@ -477,7 +519,9 @@ def normalize_initiative(initiative=None, path='initiative',
     )
     normalized.update(initiative)
 
-    for field_name in ('enabled', 'avoid_when_active', 'allow_topic_shift'):
+    for field_name in (
+            'enabled', 'avoid_when_active', 'allow_topic_shift',
+            'self_context_guard'):
         if field_name in normalized:
             normalized[field_name] = _social_bool(normalized, field_name, path)
     for field_name in ('group_type', 'style', 'topic_shift_style'):
@@ -493,6 +537,10 @@ def normalize_initiative(initiative=None, path='initiative',
         if field_name in normalized:
             normalized[field_name] = _social_int(
                 normalized, field_name, path, minimum=0)
+    for field_name in ('self_context_recent', 'self_context_max_trailing_own'):
+        if field_name in normalized:
+            normalized[field_name] = _social_int(
+                normalized, field_name, path, minimum=1)
     for field_name in (
             'topic_sources', 'topics', 'allowed_intents',
             'forbidden_topics', 'topic_shift_when', 'fallback_topics'):
@@ -551,6 +599,7 @@ def _normalize_round_overlay(round_config, preset_name):
     int_fields = {
         'limit': 1,
         'max_replies': 1,
+        'min_reply_chars': 0,
         'split_max_chars': 1,
         'split_max_parts': 1,
     }
@@ -685,6 +734,24 @@ def normalize_presets(presets=None):
     return normalized
 
 
+def normalize_account_name(value=None):
+    if value in (None, ''):
+        return ''
+    if not isinstance(value, str):
+        raise ConfigError('account_name must be a string.')
+    normalized = value.strip()
+    if not normalized:
+        raise ConfigError('account_name must not be blank.')
+    return normalized
+
+
+def _resolve_path_value(value, path_base):
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path(path_base) / path
+    return str(path)
+
+
 class AppConfig:
     def __init__(
             self, api_id=None, api_hash=None, session_path=None,
@@ -692,7 +759,8 @@ class AppConfig:
             profile=None, round_config=None, presets=None, config_path=None,
             reply_policy=None, initiative=None, persona=None,
             daemon_config=None, quota_config=None, character=None,
-            memory_config=None):
+            memory_config=None, bad_cases_config=None, account_name=None):
+        self.account_name = normalize_account_name(account_name)
         self.api_id = api_id
         self.api_hash = api_hash
         self.session_path = Path(session_path).expanduser().resolve()
@@ -714,6 +782,10 @@ class AppConfig:
         if self.memory.get('path') is not None:
             self.memory['path'] = (
                 Path(self.memory['path']).expanduser().resolve())
+        self.bad_cases = normalize_bad_cases(bad_cases_config)
+        if self.bad_cases.get('path') is not None:
+            self.bad_cases['path'] = (
+                Path(self.bad_cases['path']).expanduser().resolve())
         self.reply_policy = normalize_reply_policy(reply_policy)
         self.initiative = normalize_initiative(initiative)
         self.persona = normalize_persona(persona)
@@ -848,16 +920,18 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
     base = Path(cwd or os.getcwd()).resolve()
     config_path = _find_config_path(path, base)
     data = _read_json(config_path)
+    path_base = Path(config_path).expanduser().parent if config_path else base
 
     api_id = env.get('TG_API_ID') or data.get('api_id')
     if api_id not in (None, ''):
         api_id = int(api_id)
 
-    session_path = (
+    session_path = _resolve_path_value(
         env.get('TG_CLI_SESSION')
         or env.get('TG_SESSION_PATH')
         or data.get('session_path')
-        or str(base / 'printer.session')
+        or str(base / 'printer.session'),
+        path_base
     )
 
     allowed_chats = parse_chat_ids(
@@ -866,15 +940,17 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
         else data.get('allowed_chats', [])
     )
 
-    state_path = (
+    state_path = _resolve_path_value(
         env.get('TG_CLI_STATE')
         or data.get('state_path')
-        or str(base / 'tg_cli' / '.tg-cli-state.json')
+        or str(base / 'tg_cli' / '.tg-cli-state.json'),
+        path_base
     )
-    audit_log_path = (
+    audit_log_path = _resolve_path_value(
         env.get('TG_CLI_AUDIT_LOG')
         or data.get('audit_log_path')
-        or str(base / 'tg_cli' / 'tg-cli.audit.log')
+        or str(base / 'tg_cli' / 'tg-cli.audit.log'),
+        path_base
     )
     daemon_config = dict(data.get('daemon') or {})
     daemon_config.setdefault(
@@ -886,22 +962,31 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
     daemon_config.setdefault(
         'status_path',
         str(base / 'tg_cli' / '.tg-cli-daemon-status.json'))
+    for field_name in ('queue_path', 'lock_path', 'status_path'):
+        if daemon_config.get(field_name) not in (None, ''):
+            daemon_config[field_name] = _resolve_path_value(
+                daemon_config[field_name], path_base)
     quota_config = dict(data.get('quota') or {})
     quota_config.setdefault(
         'state_path',
         str(base / 'tg_cli' / '.tg-cli-quota-state.json'))
     if quota_config.get('state_path') not in (None, ''):
-        quota_state_path = Path(quota_config['state_path']).expanduser()
-        if not quota_state_path.is_absolute():
-            quota_config['state_path'] = str(base / quota_state_path)
+        quota_config['state_path'] = _resolve_path_value(
+            quota_config['state_path'], path_base)
     memory_config = dict(data.get('memory') or {})
     memory_config.setdefault(
         'path',
         str(base / 'tg_cli' / '.tg-cli-memory.sqlite3'))
     if memory_config.get('path') not in (None, ''):
-        memory_path = Path(memory_config['path']).expanduser()
-        if not memory_path.is_absolute():
-            memory_config['path'] = str(base / memory_path)
+        memory_config['path'] = _resolve_path_value(
+            memory_config['path'], path_base)
+    bad_cases_config = dict(data.get('bad_cases') or {})
+    bad_cases_config.setdefault(
+        'path',
+        str(base / 'tg_cli' / '.tg-cli-bad-cases.jsonl'))
+    if bad_cases_config.get('path') not in (None, ''):
+        bad_cases_config['path'] = _resolve_path_value(
+            bad_cases_config['path'], path_base)
 
     cfg = AppConfig(
         api_id=api_id,
@@ -921,6 +1006,8 @@ def load_config(path=None, env=None, cwd=None, require_credentials=False):
         daemon_config=daemon_config,
         quota_config=quota_config,
         memory_config=memory_config,
+        bad_cases_config=bad_cases_config,
+        account_name=env.get('TG_CLI_ACCOUNT') or data.get('account_name'),
     )
     if require_credentials:
         cfg.require_credentials()

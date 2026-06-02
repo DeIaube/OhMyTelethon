@@ -1,0 +1,51 @@
+{
+  "account_name": "account-b",
+  "api_id": 12345,
+  "api_hash": "set-with-TG_API_HASH",
+  "session_path": "account-b.session",
+  "allowed_chats": [
+    1234567890
+  ],
+  "state_path": "account-b.state.json",
+  "audit_log_path": "account-b.audit.log",
+  "daemon": {
+    "queue_path": "account-b.daemon-queue.json",
+    "lock_path": "account-b.daemon.lock",
+    "status_path": "account-b.daemon-status.json",
+    "poll_interval": 1,
+    "task_ttl": 900,
+    "claim_ttl": 300,
+    "max_pending": 20,
+    "max_task_context": 8,
+    "min_reply_interval": 6,
+    "max_messages_per_hour": 20
+  },
+  "quota": {
+    "state_path": "account-b.quota-state.json"
+  },
+  "memory": {
+    "enabled": false,
+    "path": "account-b.memory.sqlite3",
+    "max_task_memories": 8
+  },
+  "bad_cases": {
+    "enabled": true,
+    "path": "account-b.bad-cases.jsonl",
+    "max_records": 1000,
+    "max_task_bad_cases": 3,
+    "recent_days": 14
+  },
+  "profile": {
+    "style": "账号 B：自然、简短、像普通群聊，不要长篇解释。",
+    "language": "中文",
+    "max_chars": 80,
+    "emoji_level": "low",
+    "avoid_topics": [
+      "隐私",
+      "账号信息",
+      "借钱"
+    ],
+    "forbidden_terms": [],
+    "reply_policy": "只在有明确可接话的内容时回复；不确定时跳过；不要编造事实或冒充他人。"
+  }
+}

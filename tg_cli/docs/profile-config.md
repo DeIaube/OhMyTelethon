@@ -11,7 +11,7 @@ The current game profile has four layers:
 - `character`: elizaOS-inspired voice, action, example, topic, and evaluator hints.
 - `memory`: optional local SQLite room/user notes for Codex task context.
 
-Default initiative should stay off or low-frequency. More active behavior belongs in explicit presets such as `chat_normal` and `chat_social`.
+Default initiative should stay off or low-frequency. More active behavior belongs in explicit presets such as `chat_normal` and `chat_social`. For outgoing group-chat tests, prefer a mixed strategy: mostly direct replies, plus a smaller number of context-adjacent topic starts. In the more outgoing local guidance this is roughly 60%接话 / 40%旁路引题.
 
 ## Example
 
@@ -28,8 +28,7 @@ Default initiative should stay off or low-frequency. More active behavior belong
     "max_pending": 20,
     "max_task_context": 8,
     "min_reply_interval": 6,
-    "max_messages_per_hour": 20,
-    "max_consecutive_replies": 2
+    "max_messages_per_hour": 20
   },
   "quota": {
     "state_path": ".tg-cli-quota-state.json"
@@ -38,6 +37,13 @@ Default initiative should stay off or low-frequency. More active behavior belong
     "enabled": false,
     "path": ".tg-cli-memory.sqlite3",
     "max_task_memories": 8
+  },
+  "bad_cases": {
+    "enabled": true,
+    "path": ".tg-cli-bad-cases.jsonl",
+    "max_records": 1000,
+    "max_task_bad_cases": 3,
+    "recent_days": 14
   },
   "profile": {
     "style": "自然、简短、像普通群聊，不要长篇解释。",
@@ -103,6 +109,12 @@ Default initiative should stay off or low-frequency. More active behavior belong
 
 For a credential-free starter file, see `tg_cli/docs/local-profile-template.json`. For the full sample with credentials placeholders and presets, see `tg_cli/tg-cli.example.json`.
 
+## Path Resolution
+
+When `--config path/to/account.json` is provided, relative paths inside that file are resolved relative to `path/to/`. This applies to `session_path`, `state_path`, `audit_log_path`, `daemon.*_path`, `quota.state_path`, `memory.path`, and `bad_cases.path`.
+
+When no explicit config is loaded, defaults still use repository-local paths under `tg_cli/`.
+
 ## Fields
 
 - `profile.style`: Natural-language tone guidance.
@@ -131,6 +143,7 @@ For a credential-free starter file, see `tg_cli/docs/local-profile-template.json
 - `reply_policy.reply_threshold`: Guidance threshold from `0` to `1`; lower is more willing to reply.
 - `reply_policy.prefer_reply_when`: Situations where replying is natural.
 - `reply_policy.skip_when`: Situations where skipping is preferred.
+- In trusted test groups, circle banter terms such as 老师, 出击, 雷暴, 好评, 券, or price are not skip reasons by themselves. Keep skip rules focused on real solicitation, contact routing, private data, minors, non-consensual recording, account trading, and actual black-market behavior.
 - `reply_policy.style_rules`: Reply-shape rules, usually short strings.
 - `reply_policy.conversation_rules`: Conversation-level rules such as anti-spam or anti-fabrication.
 - `initiative.enabled`: Whether bounded proactive prompts are allowed during `game round` and `daemon run`.
@@ -142,13 +155,17 @@ For a credential-free starter file, see `tg_cli/docs/local-profile-template.json
 - `initiative.avoid_when_active`: Skip proactive starts if the group is already active.
 - `initiative.active_threshold`: Number of recent inbound messages that counts as active.
 - `initiative.recent_window`: Window in seconds used with `active_threshold`.
+- `initiative.self_context_guard`: Whether proactive starts should pause when recent non-notice context is already mostly the logged-in account.
+- `initiative.self_context_recent`: Number of recent non-notice messages inspected by the self-context guard.
+- `initiative.self_context_max_trailing_own`: Maximum consecutive logged-in-account messages allowed at the end of recent non-notice context before proactive starts are skipped with `self_context_wait`.
 - `initiative.topic_sources`: Context sources used when deciding proactive prompts.
 - `initiative.topics`: Optional low-risk topic seeds.
 - `initiative.allow_topic_shift`: Whether a proactive prompt may start a new safe topic when recent context is unsafe or unjoinable.
 - `initiative.topic_shift_when`: Situation labels where topic shifting is preferred over engaging the latest context.
 - `initiative.topic_shift_style`: Natural-language guidance for how to change topics.
-- `initiative.fallback_topics`: Safe topic seeds used when shifting away from ads, spam, grey-area, or unclear context.
+- `initiative.fallback_topics`: Safe topic seeds used when shifting away from ads, spam, bot notices, traffic redirection, real adult-service solicitation, private/incomplete banter, actual account/black-market topics, or unclear context. Light adult banter in trusted tests may be answered with a short non-explicit reaction.
 - Inbound ads, traffic redirection, and adult-service solicitations are skip-only signals. They should make the agent ignore that message, not enter a risk cooldown.
+- Moderation warnings have scope. A warning for another user is ambient context and should only skip the current task or push the operator to pivot away. A warning that names, replies to, or clearly mentions the logged-in account is a direct moderation warning and should stop or cool down the run.
 - `initiative.allowed_intents`: Allowed proactive intent labels.
 - `initiative.forbidden_topics`: Topic labels the operator should avoid.
 - `daemon.queue_path`: Local JSON queue file for pending daemon tasks. This should stay ignored by git.
@@ -161,11 +178,16 @@ For a credential-free starter file, see `tg_cli/docs/local-profile-template.json
 - `daemon.max_task_context`: Maximum recent messages included in each queued task.
 - `daemon.min_reply_interval`: Minimum seconds between successful daemon replies.
 - `daemon.max_messages_per_hour`: Per-daemon hourly outbound message cap.
-- `daemon.max_consecutive_replies`: Maximum consecutive account replies before another inbound message is required.
+- Consecutive account replies are not capped separately; pacing is controlled by `daemon.min_reply_interval`, `daemon.max_messages_per_hour`, queue TTL, and operator/task relevance.
 - `quota.state_path`: Local JSON state file for the active quota run. The default is `.tg-cli-quota-state.json` under `tg_cli/`; keep it, its lock file, and atomic-write temp files ignored by git.
 - `memory.enabled`: Whether `game suggest`, `daemon`, and `quota` include local memory snippets. Default: `false`.
 - `memory.path`: Local SQLite database for room/user memories. Default: `.tg-cli-memory.sqlite3` under `tg_cli/`; keep it and SQLite sidecar files ignored by git.
 - `memory.max_task_memories`: Maximum memory snippets included in one operator task.
+- `bad_cases.enabled`: Whether automatic bad case capture and prompt injection are enabled. Default: `true`.
+- `bad_cases.path`: Local JSONL database for automatically captured bad cases. Default: `.tg-cli-bad-cases.jsonl` under `tg_cli/`; keep it ignored by git.
+- `bad_cases.max_records`: Maximum local bad case records retained after append.
+- `bad_cases.max_task_bad_cases`: Maximum recent same-chat bad cases injected into one operator task.
+- `bad_cases.recent_days`: Retention/search hint for future cleanup policies; current storage keeps `max_records`.
 
 Unknown extra keys are preserved in `game suggest --json`, so operator-specific hints can be added without breaking older versions.
 
@@ -181,12 +203,12 @@ Top-level `presets` can overlay any of these objects:
 - `daemon` non-path rate/queue controls
 - `character`
 
-Only one preset is selected per command. If you want to combine a persona with a social initiative setting, copy both into one named preset. `quota start --preset NAME` uses the same resolved `profile`, `persona`, `reply_policy`, `initiative`, and `character` guidance when creating quota tasks. Preset-level `daemon` may tune non-path controls such as `min_reply_interval`, `max_messages_per_hour`, and `max_consecutive_replies`; keep `queue_path`, `lock_path`, and `status_path` at the top level.
+Only one preset is selected per command. If you want to combine a persona with a social initiative setting, copy both into one named preset. `quota start --preset NAME` uses the same resolved `profile`, `persona`, `reply_policy`, `initiative`, and `character` guidance when creating quota tasks. Preset-level `daemon` may tune non-path controls such as `min_reply_interval` and `max_messages_per_hour`; keep `queue_path`, `lock_path`, and `status_path` at the top level.
 
 Common starter presets:
 
 - `chat_normal`: ordinary group-chat behavior, low-frequency initiative.
-- `chat_social`: more active social behavior, willing to reply to concrete harmless openings and, when enabled, casually shift to safe fallback topics if the latest context is ads, spam, grey-area, or unjoinable. It is still bounded by caps.
+- `chat_social`: more active social behavior, willing to reply to concrete harmless openings and to start short, safe adjacent topics from context such as food, games, sleep, work, or delivery. It raises `initiative.active_threshold`, uses an `initiative.min_starts` floor, keeps `initiative.self_context_guard` on, and can casually shift to safe fallback topics if the latest context is ads, spam, actual account/black-market topics, or unjoinable. It is still bounded by caps.
 - `friends_normal`: friend group behavior, casual but privacy-aware.
 - `interest_social`: topic-centered interest group behavior.
 - `public_group_safe`: conservative public-group behavior with initiative disabled.
@@ -253,6 +275,8 @@ v0.4 non-goals:
 
 Quota mode is for Codex-automation-triggered target runs. `tg-cli` does not schedule the daily start time; Codex automation, cron, launchd, or another external scheduler starts the run, and `tg-cli quota` manages local task selection, Telegram sending, counting, and stop behavior.
 
+Scenario run config is an operator handoff layer over quota mode. Use it for authorized/informed long tests such as one local account, one test group, one persona/preset, and `target_messages` of `150`. Scenario fields are not safety overrides and should not contain credentials.
+
 Minimal local config:
 
 ```json
@@ -261,6 +285,30 @@ Minimal local config:
   "quota": {
     "state_path": ".tg-cli-quota-state.json"
   }
+}
+```
+
+Recommended scenario metadata:
+
+```json
+{
+  "name": "authorized-chat-social-150",
+  "account": "local-session-label",
+  "chat_id": 2400000996,
+  "persona": "ordinary group member voice; no real-person impersonation",
+  "preset": "chat_social",
+  "target_messages": 150,
+  "dry_run_first": true,
+  "max_runtime_minutes": 240,
+  "stop_on": [
+    "target_reached",
+    "manual_stop",
+    "moderation_warning",
+    "spam_complaint",
+    "too_many_stale_context",
+    "hourly_limit",
+    "unsafe_context_ratio"
+  ]
 }
 ```
 
@@ -273,12 +321,16 @@ tg-cli quota start --chat 111111111:120 --chat 222222222:300 --preset chat_socia
 Operator commands:
 
 ```sh
+tg-cli scenario start authorized-chat-social-150 --json
 tg-cli quota status --json
 tg-cli quota next --json
 tg-cli quota reply <task_id> "这把先看看队友怎么说" --dry-run --json
 tg-cli quota reply <task_id> "这把先看看队友怎么说" --json
+tg-cli quota skip <task_id> --reason "unsafe_or_stale_context" --json
 tg-cli quota stop
 ```
+
+Recommended scenario operator loop: `scenario start NAME --json`, `quota status --json`, `quota next --json`, first suitable `quota reply ... --dry-run --json`, live `quota reply ... --json` only when the context remains natural, `quota skip ... --reason ... --json` for unsuitable tasks, then target reached stop/report.
 
 `quota.state_path` stores local runtime state for one active quota run: run id, run status, per-chat targets, sent counts, task ids, and sent Telegram message ids. It may include bounded recent context in tasks. Keep `.tg-cli-quota-state.json`, its lock file, and atomic-write temp files ignored, do not commit them, and do not put credentials in them.
 
@@ -287,12 +339,16 @@ Quota counting rules:
 - Count only successful Telegram sends.
 - Count split replies by actual sent Telegram message parts.
 - Do not increment counts for `--dry-run`.
-- Apply `daemon.min_reply_interval`, `daemon.max_messages_per_hour`, and `daemon.max_consecutive_replies` to quota replies.
+- Apply `daemon.min_reply_interval` and `daemon.max_messages_per_hour` to quota replies.
+- Re-read the latest chat tail before real `quota reply` sends; if a newer inbound message appeared after the task snapshot, skip the task as `stale_context` and send nothing.
+- Use `quota skip` for unsafe, stale, unclear, or low-value tasks instead of sending filler replies.
 - Mark a target `done` when `sent_count` reaches `target_count`.
 - Mark the run `done` when all targets are done.
 - Mark the run `stopped` when `quota stop` is requested. In-flight sends that already passed the final safety gate may still be counted if Telegram accepted them.
 
-Quota safety is the same outbound safety stance as the rest of the CLI: target chats must be in `allowed_chats`, `pause` blocks `quota reply`, forbidden terms are checked before `client.send_message`, daemon pacing limits apply, and audit logging records hashes and lengths instead of raw message text.
+Quota safety is the same outbound safety stance as the rest of the CLI: target chats must be in `allowed_chats`, `pause` blocks `quota reply`, forbidden terms are checked before `client.send_message`, daemon pacing limits apply, and audit logging records hashes and lengths instead of raw message text. Scenario targets such as `150` messages are caps for authorized tests, not permission to send filler or bypass `quota skip`, stale preflight, audit logging, or bad-case constraints.
+
+Other agents taking over a scenario should read `tg_cli/AGENTS.md`, dry-run first, use `quota skip` when context is unsuitable, stop automatically on `target_reached`, and avoid describing the run as platform risk bypass, anti-detection work, or disguise.
 
 ## Memory Config
 
@@ -320,17 +376,21 @@ Store summaries, preferences, recurring topics, and explicitly provided stable f
 
 ## Prompt Behavior
 
-`tg-cli game context <chat> --limit 200 --preset NAME --operator codex --json` returns a larger entry warmup summary before daemon or longer live tests. It includes resolved `profile`, `persona`, `reply_policy`, `initiative`, active speakers, local keyword/topic signals, notice/bot messages, recent questions, guidance, and a bounded message tail. The CLI does not call an LLM or generate a reply.
+`tg-cli game context <chat> --limit 200 --preset NAME --operator codex --json` returns a larger entry warmup summary before daemon or longer live tests. It includes resolved `profile`, `persona`, `reply_policy`, `initiative`, recent same-chat `bad_cases`, active speakers, local keyword/topic signals, notice/bot messages, recent questions, guidance, and a bounded message tail. The CLI does not call an LLM or generate a reply.
 
-`tg-cli game suggest <chat>` returns `profile`, `persona`, `reply_policy`, `initiative`, selected `preset`, and recent messages. The CLI does not call an LLM or generate a reply.
+`tg-cli game suggest <chat>` returns `profile`, `persona`, `reply_policy`, `initiative`, selected `preset`, recent same-chat `bad_cases`, and recent messages. The CLI does not call an LLM or generate a reply.
 
 `tg-cli game round <chat>` prints the resolved guidance once at startup. For each inbound message or merged batch it prints the incoming text, optionally recent context, and a compact instruction. Empty input skips the message. `/quit` stops the round.
 
 `tg-cli quota next --json` returns one quota task with bounded context and the resolved guidance selected at `quota start`. The CLI still does not generate a reply; the external operator writes the reply and sends it with `quota reply`.
 
+When `bad_cases.enabled` is true, known failures are appended to the local JSONL store without raw text. Automatic triggers include `self_context_wait`, `stale_context`, `duplicate_reply_context`, `min_reply_chars`, `max_replies`, `forbidden_terms`, `hourly_limit`, AI/anti-spam challenge signals, moderation-scope signals, and unsafe inbound topics. To extend the mechanism, add one reason entry to `tg_cli.bad_cases.BAD_CASE_REASON_RULES`, then call `record_bad_case` at the rule trigger with bounded context messages. Stored messages are reduced to id, `out`, sender hash, text hash, and text length.
+
 When `initiative.enabled` is true, `game round` may prompt the operator after the group has been idle long enough. The operator still types the proactive message, and empty input skips it. This is not daemon mode and does not authorize automatic writes.
 
-When `initiative.allow_topic_shift` is true, proactive prompts should not engage unsafe recent context directly. Instead, the operator may start one short neutral fallback topic from `initiative.fallback_topics` and avoid explaining the subject change. This is intended for social presets that should not go silent just because the latest messages are ads, spam, or otherwise unjoinable.
+When `initiative.allow_topic_shift` is true, proactive prompts should not engage unsafe recent context directly. Instead, the operator should usually start one short neutral fallback topic from `initiative.fallback_topics` and avoid explaining the subject change. This is intended for social presets that should not go silent just because the latest messages are ads, spam, bot notices, traffic redirection, real adult-service solicitation, private/incomplete banter, or otherwise unjoinable. Light adult banter in trusted tests may still be answered with a short non-explicit reaction. For outgoing presets, raising `initiative.active_threshold` makes a busy room less likely to suppress proactive openings, while `initiative.min_starts` guarantees a small floor of topic starts within a bounded run.
+
+When `initiative.self_context_guard` is true, proactive prompts are skipped before task creation if the recent non-notice tail ends with at least `initiative.self_context_max_trailing_own` messages from the logged-in account. The skip reason is `self_context_wait`; it refreshes initiative cooldown but does not increment `initiative.min_starts` progress, so the run can try again after new human context appears.
 
 At exit, `game round` prints a report like:
 
@@ -365,7 +425,7 @@ Audit records store text hashes and lengths, not raw message text.
 
 Social Policy guidance does not bypass safety. Active or social presets still pass the same `allowed_chats` whitelist, global `pause`, forbidden-term checks, round rate limits, audit logging, and final round report.
 
-Daemon guidance also does not bypass safety. `daemon reply` must pass whitelist, `pause`, forbidden-term checks, and queue audit before a reply can be queued. The running daemon enforces daemon-specific `min_reply_interval`, `max_messages_per_hour`, `max_consecutive_replies`, stale queued-reply expiration, held rate-limit retry state, split-part checks, and final send audit before any reply part reaches Telegram.
+Daemon guidance also does not bypass safety. `daemon reply` must pass whitelist, `pause`, forbidden-term checks, and queue audit before a reply can be queued. The running daemon enforces daemon-specific `min_reply_interval`, `max_messages_per_hour`, stale queued-reply expiration, held rate-limit retry state, split-part checks, and final send audit before any reply part reaches Telegram.
 
 ## Round Options
 
@@ -391,8 +451,9 @@ tg-cli game round 5217114569 --duration 120 --max-replies 10 \
 - `--random-delay-min` / `--random-delay-max`: Random delay before sending the first part of a typed reply.
 - `--skip-short-ack`: Skip low-information messages such as `嗯`, `哈哈`, `真的假的`, and one-character acknowledgements.
 - `--merge-window`: Collect rapid consecutive inbound messages before prompting once.
+- `round.min_reply_chars`: Minimum non-space characters required for every agent reply message part. The default is `7`.
 - `--split-long-replies`: Split long typed replies using `round.split_*`.
 
-In addition to prompt guidance, `tg-cli` applies deterministic inbound skips before asking the operator for a reply. Messages containing AI/robot accusations, anti-spam or ban warnings, adult-service solicitations, non-consensual recording, underage or age-risk language, ads, or grey-area account/black-market topics are skipped locally.
+In addition to prompt guidance, `tg-cli` applies deterministic inbound skips before asking the operator for a reply. Messages containing AI/robot accusations, anti-spam or ban warnings, adult-service solicitations, non-consensual recording, underage or age-risk language, ads, or actual account/black-market topics are skipped locally.
 
-When `round.split_long_replies` is enabled, splitting prefers punctuation boundaries, falls back to character length, and caps parts with `round.split_max_parts`. Splitting is for naturally separate thoughts, not for raising message count. Each part still goes through forbidden-term checks and audit logging; `game round` also applies end-buffer checks.
+When `round.split_long_replies` is enabled, splitting prefers punctuation boundaries, falls back to character length, and caps parts with `round.split_max_parts`. Social presets can prefer richer copy split into multiple natural short messages, up to five parts in the bundled `chat_social` template. Each part must satisfy `round.min_reply_chars` and still goes through forbidden-term checks and audit logging; `game round` also applies end-buffer checks.

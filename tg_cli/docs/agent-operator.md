@@ -27,6 +27,7 @@ The `game suggest` JSON output includes:
 - `initiative`: bounded proactive-opening guidance.
 - `character`: elizaOS-inspired voice, action, and evaluator hints.
 - `memory`: optional local room/user memory snippets when memory is enabled.
+- `bad_cases`: recent same-chat automatic lessons such as self-flood, stale-context, or too-short reply failures.
 - `messages`: recent Telegram messages in chronological order.
 - `instruction`: a ready-to-use prompt for the external agent.
 
@@ -68,7 +69,7 @@ The command reads `round.*` defaults from `tg_cli/.tg-cli.json`. When `--preset 
 
 - Empty input skips the current message.
 - `/quit` stops the round.
-- A typed reply is checked against pause, whitelist, forbidden terms, rate limits, end buffer, and optional long-reply splitting before sending.
+- A typed reply is checked against pause, whitelist, forbidden terms, minimum reply length, rate limits, end buffer, and optional long-reply splitting before sending.
 - `--max-replies` is enforced as an outbound Telegram message cap; a split reply is skipped if it would exceed the remaining cap.
 
 At the end of the round, read the structured report before deciding whether to start another round. It includes `duration`, `elapsed`, `received_batches`, `received_messages`, `prompted`, `sent_replies`, `sent_message_ids`, `skip_reasons`, `avg_reply_chars`, `initiative_prompts`, `initiative_sent`, `initiative_skipped`, `initiative_sent_message_ids`, and `initiative_skip_reasons`.
@@ -78,6 +79,27 @@ Recommended Social Policy smoke test:
 ```sh
 tg-cli game round 2400000996 --duration 300 --preset chat_social
 ```
+
+## Two-Agent / Two-Account Operation
+
+Use one config per Telegram account. Each external agent must keep using its own `--config` for every command, including daemon queue commands:
+
+```sh
+tg-cli --config tg_cli/accounts/account-a.json config inspect --json
+tg-cli --config tg_cli/accounts/account-b.json config inspect --json
+tg-cli --config tg_cli/accounts/account-a.json config doctor --other-config tg_cli/accounts/account-b.json
+
+tg-cli --config tg_cli/accounts/account-a.json daemon run 111111111 --preset chat_social
+tg-cli --config tg_cli/accounts/account-b.json daemon run 222222222 --preset chat_social
+
+tg-cli --config tg_cli/accounts/account-a.json daemon next --json
+tg-cli --config tg_cli/accounts/account-a.json daemon reply TASK_ID "这把先看看队友怎么说" --dry-run --json
+
+tg-cli --config tg_cli/accounts/account-b.json daemon next --json
+tg-cli --config tg_cli/accounts/account-b.json daemon reply TASK_ID "这把先等等信息" --dry-run --json
+```
+
+Do not share a Telethon `session_path` across agents. Do not share daemon queue/lock/status files across account configs. Different accounts may run in parallel only when their runtime files are distinct.
 
 ## Daemon Task Queue
 
@@ -108,20 +130,47 @@ tg-cli daemon stop
 
 Expected operator loop:
 
-- Run `daemon next --json` to claim one pending task with recent context and resolved `profile`, `persona`, `reply_policy`, `initiative`, `character`, `actions`, `evaluators`, and relevant `memory`. The claim lease expires after `daemon.claim_ttl`; use `daemon next --peek --json` only when inspecting without taking the task.
+- Run `daemon next --json` to claim one pending task with recent context and resolved `profile`, `persona`, `reply_policy`, `initiative`, `character`, `actions`, `evaluators`, relevant `memory`, and recent `bad_cases`. The claim lease expires after `daemon.claim_ttl`; use `daemon next --peek --json` only when inspecting without taking the task.
+- If no proactive task appears in a quiet room, check daemon output or `daemon status --json` for `self_context_wait`; the self-context guard suppresses initiative when the latest non-notice messages are already from the logged-in account.
 - Decide outside the CLI whether a normal person would reply, skip, or wait.
 - Use `daemon reply <task_id> "..." --dry-run` for the first pass in a new group or config; it validates and audits without sending or consuming the task.
-- Use `daemon reply <task_id> "..."` only when the message is natural and still relevant. With `round.split_long_replies`, a reply can be split into short Telegram messages only when the parts are naturally separate thoughts.
+- Use `daemon reply <task_id> "..."` only when the message is natural and still relevant. Each outgoing part must satisfy `round.min_reply_chars`. With `round.split_long_replies`, a richer reply can be split into short Telegram messages when the parts are naturally separate thoughts, up to `round.split_max_parts`.
 - Use `daemon skip <task_id> --reason TEXT` for spam, ads, private data, conflict, stale context, low information, or anything the operator cannot join naturally.
 - Check `daemon status --json` before and after longer runs.
 
-Every daemon reply part still goes through `allowed_chats`, `pause`, forbidden-term checks, queue audit logging, daemon rate limits, consecutive reply limits, stale queued-reply expiration, held rate-limit retry state, final send audit logging, and the local single-instance lock. `daemon stop` requests a clean shutdown; it is not a destructive reset of queue or audit history.
+Every daemon reply part still goes through `allowed_chats`, `pause`, forbidden-term checks, queue audit logging, daemon pacing limits, stale queued-reply expiration, held rate-limit retry state, final send audit logging, and the local single-instance lock. `daemon stop` requests a clean shutdown; it is not a destructive reset of queue or audit history.
 
 v0.4 intentionally does not support multi-group hosting, automatic model-provider calls, launchd/system service setup, or a web UI. Keep those out of operator workflows until the single-chat queue is stable.
 
 ## Quota Target Runs
 
 Use quota mode when the daily trigger lives outside `tg-cli`. A Codex automation can wake the thread at 14:00, then ask `tg-cli` to manage "send up to N successful Telegram messages per chat" for that run.
+
+Long-running scenarios are quota handoffs with extra operator metadata, often "one local account, one authorized/informed test group, one persona or preset, target 150 successful messages." They are only for authorized test groups and do not change CLI safety. Do not describe them as platform risk bypass, anti-detection work, disguised automation, or real-person impersonation.
+
+Recommended scenario config fields:
+
+```json
+{
+  "name": "authorized-chat-social-150",
+  "account": "local-session-label",
+  "chat_id": 2400000996,
+  "persona": "ordinary group member voice; no real-person impersonation",
+  "preset": "chat_social",
+  "target_messages": 150,
+  "dry_run_first": true,
+  "max_runtime_minutes": 240,
+  "stop_on": [
+    "target_reached",
+    "manual_stop",
+    "moderation_warning",
+    "spam_complaint",
+    "too_many_stale_context",
+    "hourly_limit",
+    "unsafe_context_ratio"
+  ]
+}
+```
 
 Start one local run with one or more chat targets:
 
@@ -138,16 +187,21 @@ tg-cli quota status --json
 tg-cli quota next --json
 tg-cli quota reply <task_id> "这把先看看队友怎么说" --dry-run --json
 tg-cli quota reply <task_id> "这把先看看队友怎么说" --json
+tg-cli quota skip <task_id> --reason "unsafe_or_stale_context" --json
 tg-cli quota status --json
 ```
 
 Expected flow:
 
+- For a named scenario, first read the scenario config and `tg_cli/AGENTS.md`, verify the named account/chat/preset, then run `tg-cli scenario start NAME --json` so quota state includes non-secret scenario metadata. Use manual `quota start --chat CHAT_ID:COUNT` only for ad hoc quota runs.
 - Run `quota status --json` before starting the loop to see `target_count`, `sent_count`, `remaining_count`, and per-chat status.
 - Run `quota next --json` to claim one task from the next active target chat. The payload should include bounded recent context and resolved `profile`, `persona`, `reply_policy`, `initiative`, `character`, `actions`, `evaluators`, `memory`, `round`, and `preset`.
 - Decide outside the CLI whether a normal person would reply, skip, or wait. The CLI still does not call Codex, Claude, OpenAI, Anthropic, or any model provider.
 - Use `quota reply <task_id> "..." --dry-run --json` for a new group, new preset, or suspicious context. Dry-run validates whitelist, `pause`, forbidden terms, and audit behavior without sending, consuming the task, or incrementing counts.
 - Use `quota reply <task_id> "..." --json` only when the message is natural and still relevant. If reply splitting is enabled, each sent Telegram message part is counted separately.
+- Use `quota skip <task_id> --reason "..." --json` when the context is unsafe, stale, unclear, self-heavy, or not worth replying to.
+- Do not send filler just to advance the count. If the right action is not to reply, use `quota skip`.
+- Stop automatically when `sent_count` reaches `target_messages`, then report final `quota status --json` counts.
 - Stop with `tg-cli quota stop` when the operator should stop before targets are complete.
 
 Counting rules:
@@ -155,7 +209,8 @@ Counting rules:
 - Only successful Telegram sends increment the target's `sent_count`.
 - A split reply counts by actual sent Telegram message parts.
 - Dry-run replies never increment counts.
-- `quota reply` honors `daemon.min_reply_interval`, `daemon.max_messages_per_hour`, and `daemon.max_consecutive_replies`.
+- `quota reply` honors `daemon.min_reply_interval` and `daemon.max_messages_per_hour`.
+- Before a real send, `quota reply` re-reads the latest chat tail. If a newer inbound message appeared after the task snapshot, it skips the task with `reason=stale_context` and sends nothing.
 - Once a target reaches its count, that chat becomes `done` for the active run.
 - Once all targets are done, the whole run becomes `done`.
 - `quota stop` changes an active run to `stopped`; it does not delete audit records or sent message ids. In-flight sends that already passed the final safety gate may still be counted if Telegram accepted them.
@@ -164,6 +219,8 @@ Quota state is local runtime data. The default file is `tg_cli/.tg-cli-quota-sta
 
 Quota mode is separate from daemon mode: daemon remains a foreground single-chat queue, while quota mode is a multi-chat target-count flow started by external automation. Avoid running multiple Telegram-writing commands against the same Telethon session at the same time.
 
+For scenario handoff details and report expectations, see `tg_cli/docs/scenario-runs.md`.
+
 ## Safety Expectations
 
 - Keep target groups in `allowed_chats`.
@@ -171,6 +228,11 @@ Quota mode is separate from daemon mode: daemon remains a foreground single-chat
 - Keep `pause` available as the emergency stop.
 - Do not run another Telegram-using `tg-cli` command with the same Telethon session while a live round or daemon is active.
 - Do not reply to spam, gambling, private-data requests, money requests, or conflict escalation.
-- Keep default initiative off or low-frequency. More active presets such as `chat_social` may use a small `initiative.min_starts` floor and preset daemon caps for short runs, but still go through whitelist, `pause`, forbidden-term checks, rate limits, audit logging, and the round/daemon report.
-- Prefer short replies. Let `round.split_long_replies` split only when a longer response is natural.
+- Keep default initiative off or low-frequency. More active presets such as `chat_social` may use a small `initiative.min_starts` floor, a higher `initiative.active_threshold`, `initiative.self_context_guard`, and preset daemon caps for short runs, but still go through whitelist, `pause`, forbidden-term checks, rate limits, audit logging, and the round/daemon report.
+- Treat outgoing behavior as a mix of direct replies and short context-adjacent topic starts. Do not force every message to answer the latest line. Light adult banter in trusted tests may get a short non-explicit reaction. Do not engage ads, real adult-service solicitations, actual account/black-market topics, or spam directly; for trusted social tests, ignore that context and pivot to a safe light topic when the task is proactive.
+- In trusted test groups, do not skip harmless in-group banter solely because it uses circle terms such as 老师, 出击, 雷暴, 好评, 券, or price. Those words only become skip reasons when the current message includes real solicitation, contact routing, private data, minors, non-consensual recording, account trading, or actual black-market behavior.
+- Do not stop a run just because another user receives a moderation warning. Treat it as ambient context: skip that specific task or pivot away. Stop or cool down only when the warning names, replies to, or clearly mentions the logged-in account.
+- Prefer natural longer copy for active social presets, and let `round.split_long_replies` split it into multiple short messages when each part adds content.
+- Check `bad_cases` before replying. They are local lessons from recent blocked/skipped behavior and should be treated as constraints, not as permission to bypass safety.
 - Treat quota counts as caps, not a reason to force filler replies. Reaching a target still requires natural context, whitelist, `pause`, forbidden-term checks, dry-run discipline, and audit logging.
+- Long-running scenario tests must stay in authorized/informed groups. All sends remain constrained by allowlist, `pause`, forbidden terms, daemon pacing, quota skip, stale preflight, audit logs, and bad-case constraints.

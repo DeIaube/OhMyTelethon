@@ -161,7 +161,8 @@ def save_queue(path, payload):
 def create_task(chat, messages, profile, persona, reply_policy, initiative,
                 preset=None, kind='message', prompt=None, now=None,
                 context_summary=None, character=None, actions=None,
-                evaluators=None, memory=None, action=None):
+                evaluators=None, memory=None, bad_cases=None, action=None,
+                account_name=None):
     timestamp = _iso_utc(now)
     compact_ts = timestamp.replace(':', '').replace('+', '').replace('-', '')
     compact_ts = compact_ts.replace('.', '')
@@ -190,8 +191,12 @@ def create_task(chat, messages, profile, persona, reply_policy, initiative,
         task['evaluators'] = _deepcopy_json(evaluators)
     if memory is not None:
         task['memory'] = _deepcopy_json(memory)
+    if bad_cases is not None:
+        task['bad_cases'] = _deepcopy_json(bad_cases)
     if action is not None:
         task['action'] = str(action)
+    if account_name not in (None, ''):
+        task['account_name'] = str(account_name)
     return task
 
 

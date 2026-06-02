@@ -7,6 +7,7 @@
 - Character: voice and behavior hints, similar to a small elizaOS character file.
 - Room: one Telegram group or channel. Quota mode can select across rooms; daemon mode remains one room per foreground daemon.
 - Memory: concise local summaries and facts. It does not store a raw message archive by default.
+- Bad cases: local lessons from blocked/skipped behavior, stored without raw Telegram text and injected into future same-room tasks.
 - Action: the kind of response Codex should consider, such as `reply`, `ask_open_question`, `light_joke`, or `skip`.
 - Evaluator: deterministic local checks that decide whether to create an operator task, such as cooldown, short-ack skipping, and no-identity-claim guidance.
 
@@ -16,7 +17,7 @@
 Telegram messages
   -> tg-cli context / daemon / quota
   -> local evaluators choose skip or task
-  -> task includes profile, persona, reply_policy, initiative, character, memory
+  -> task includes profile, persona, reply_policy, initiative, character, memory, bad_cases
   -> Codex writes a reply, skips, or stores memory
   -> safety checks, pacing, audit
   -> Telethon sends, if allowed
@@ -32,6 +33,7 @@ tg-cli memory remember CHAT_ID --scope room --kind summary --text "这个群最�
 tg-cli quota start --chat CHAT_ID:5 --preset chat_social
 tg-cli quota next --json
 tg-cli quota reply TASK_ID "这话题可以，晚上看有没有人开。" --dry-run --json
+tg-cli quota skip TASK_ID --reason "unsafe_or_stale_context" --json
 ```
 
 Enable memory only in local ignored config:

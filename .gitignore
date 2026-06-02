@@ -19,9 +19,31 @@
 .tg-cli-quota-state.json
 .tg-cli-quota-state.json.lock
 *.tg-cli-quota-state.json.*.tmp
+.tg-cli-scenarios.json
+.tg-cli-scenarios.json.*
 .tg-cli-memory.sqlite3
 .tg-cli-memory.sqlite3-*
+.tg-cli-bad-cases.jsonl
+.tg-cli-bad-cases.jsonl.*
 tg-cli.audit.log
+
+# Local per-account tg-cli configs and runtime files
+/tg_cli/accounts/*.json
+!/tg_cli/accounts/*.example.json
+/tg_cli/accounts/*.session
+/tg_cli/accounts/*.session-journal
+/tg_cli/accounts/*.state.json
+/tg_cli/accounts/*.audit.log
+/tg_cli/accounts/*.daemon-queue.json
+/tg_cli/accounts/*.daemon-queue.json.lock
+/tg_cli/accounts/*.daemon-status.json
+/tg_cli/accounts/*.daemon.lock
+/tg_cli/accounts/*.quota-state.json
+/tg_cli/accounts/*.quota-state.json.lock
+/tg_cli/accounts/*.memory.sqlite3
+/tg_cli/accounts/*.memory.sqlite3-*
+/tg_cli/accounts/*.bad-cases.jsonl
+/tg_cli/accounts/*.bad-cases.jsonl.*
 
 # Builds and testing
 __pycache__/

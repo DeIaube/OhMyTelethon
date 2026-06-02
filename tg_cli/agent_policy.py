@@ -8,6 +8,9 @@ SHORT_ACKS = {
     'ok', 'okay', 'yes', 'no', 'lol', 'haha',
 }
 QUESTION_MARKERS = ('?', '？', '吗', '嘛', '咋', '怎么', '谁', '什么', '几点')
+MODERATION_WARNING_TERMS = (
+    '警告', '小黑屋', '群规范',
+)
 INBOUND_SKIP_SIGNALS = (
     (
         'ai_challenge',
@@ -72,10 +75,23 @@ def _normalized_signal_text(text):
     return str(text or '').casefold().replace(' ', '')
 
 
-def classify_inbound_signal(text):
+def _mentions_any_name(compact_text, names):
+    for name in names or ():
+        compact_name = _normalized_signal_text(name)
+        if compact_name and compact_name in compact_text:
+            return True
+    return False
+
+
+def classify_inbound_signal(text, me_names=None, mentions_me=False):
     compact = _normalized_signal_text(text)
     if not compact:
         return None
+    if any(_normalized_signal_text(term) in compact
+           for term in MODERATION_WARNING_TERMS):
+        if mentions_me or _mentions_any_name(compact, me_names):
+            return 'direct_moderation_warning'
+        return 'ambient_moderation_warning'
     for reason, terms in INBOUND_SKIP_SIGNALS:
         for term in terms:
             if _normalized_signal_text(term) in compact:
@@ -93,7 +109,8 @@ def evaluate_message_batch(text, round_config, reply_policy, initiative,
     text = str(text or '').strip()
     if not text:
         return {'should_prompt': False, 'reason': 'empty', 'action': 'skip'}
-    inbound_skip_reason = classify_inbound_signal(text)
+    inbound_skip_reason = classify_inbound_signal(
+        text, me_names=me_names, mentions_me=mentions_me)
     if inbound_skip_reason:
         return {
             'should_prompt': False,

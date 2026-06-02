@@ -9,11 +9,14 @@ import sqlite3
 import sys
 
 from . import __version__
+from . import account_isolation
 from .config import (
     ConfigError, load_config, normalize_chat_id, normalize_daemon,
     normalize_round,
 )
 from . import daemon as daemon_store
+from . import bad_cases as bad_case_store
+from . import scenarios as scenario_store
 from .agent_memory import MemoryStore
 from .agent_report import summarize_agent_run
 from .agent_rooms import select_next_room
@@ -22,6 +25,7 @@ from .safety import SafetyError
 from .telegram_ops import (
     TelegramCliError, codex_context, daemon_run, dumps_json, get_me,
     group_context, history, interactive_round, list_dialogs, observe, send_text,
+    validate_agent_reply_parts,
 )
 
 
@@ -232,6 +236,22 @@ def _quota_status(config):
     return helper(_quota_state_path(config))
 
 
+def _create_quota_run(store, path, targets, preset=None, scenario=None,
+                      account_name=''):
+    kwargs = {'preset': preset}
+    if scenario is not None:
+        kwargs['scenario'] = scenario
+    if account_name:
+        kwargs['account_name'] = account_name
+    try:
+        return store.create_run(path, targets, **kwargs)
+    except TypeError as exc:
+        if 'account_name' not in str(exc):
+            raise
+        kwargs.pop('account_name', None)
+        return store.create_run(path, targets, **kwargs)
+
+
 def _quota_target_remaining(target):
     return max(0, int(target.get('target_count') or 0) -
                int(target.get('sent_count') or 0))
@@ -324,6 +344,7 @@ def _validate_quota_reply(config, task, text):
         raise safety.SafetyError(
             'Message contains forbidden/sensitive profile term(s): {}.'.format(
                 ', '.join(matches)))
+    validate_agent_reply_parts(task_config, text)
     return task_config
 
 
@@ -367,6 +388,22 @@ def build_parser():
     parser.add_argument('--version', action='version', version='tg-cli {}'.format(__version__))
     parser.add_argument('--config', help='Path to JSON config. Defaults to ./.tg-cli.json then ~/.config/tg-cli/config.json.')
     sub = parser.add_subparsers(dest='command', required=True)
+
+    config_cmd = sub.add_parser(
+        'config', help='Inspect and validate tg-cli configuration.')
+    config_sub = config_cmd.add_subparsers(
+        dest='config_command', required=True)
+
+    config_inspect = config_sub.add_parser(
+        'inspect', help='Show resolved config paths and account metadata.')
+    config_inspect.add_argument('--json', action='store_true')
+
+    config_doctor = config_sub.add_parser(
+        'doctor', help='Check this config against other account configs.')
+    config_doctor.add_argument(
+        '--other-config', action='append', default=[], required=True,
+        help='Another account config to compare. Repeat for more accounts.')
+    config_doctor.add_argument('--json', action='store_true')
 
     me = sub.add_parser('me', help='Show the logged-in Telegram account.')
     me.add_argument('--json', action='store_true')
@@ -535,6 +572,42 @@ def build_parser():
         help='Validate without sending or incrementing quota counts.')
     quota_reply.add_argument('--json', action='store_true')
 
+    quota_skip = quota_sub.add_parser(
+        'skip', help='Skip one pending quota task without sending.')
+    quota_skip.add_argument('task_id')
+    quota_skip.add_argument(
+        '--reason', default='skipped',
+        help='Reason stored on the skipped quota task.')
+    quota_skip.add_argument('--json', action='store_true')
+
+    scenario = sub.add_parser(
+        'scenario', help='Manage local long-run quota scenarios.')
+    scenario_sub = scenario.add_subparsers(
+        dest='scenario_command', required=True)
+
+    scenario_list = scenario_sub.add_parser(
+        'list', help='List configured long-run scenarios.')
+    scenario_list.add_argument(
+        '--path', default=str(scenario_store.DEFAULT_SCENARIOS_PATH),
+        help='Path to local scenario JSON config.')
+    scenario_list.add_argument('--json', action='store_true')
+
+    scenario_show = scenario_sub.add_parser(
+        'show', help='Show one configured long-run scenario.')
+    scenario_show.add_argument('name')
+    scenario_show.add_argument(
+        '--path', default=str(scenario_store.DEFAULT_SCENARIOS_PATH),
+        help='Path to local scenario JSON config.')
+    scenario_show.add_argument('--json', action='store_true')
+
+    scenario_start = scenario_sub.add_parser(
+        'start', help='Start a quota run from one configured scenario.')
+    scenario_start.add_argument('name')
+    scenario_start.add_argument(
+        '--path', default=str(scenario_store.DEFAULT_SCENARIOS_PATH),
+        help='Path to local scenario JSON config.')
+    scenario_start.add_argument('--json', action='store_true')
+
     memory = sub.add_parser('memory', help='Manage local agent memory.')
     memory_sub = memory.add_subparsers(dest='memory_command', required=True)
 
@@ -557,6 +630,25 @@ def build_parser():
     memory_list.add_argument('--sender-id', type=int)
     memory_list.add_argument('--limit', type=int, default=20)
     memory_list.add_argument('--json', action='store_true')
+
+    badcase = sub.add_parser('badcase', help='Inspect local bad case records.')
+    badcase_sub = badcase.add_subparsers(dest='badcase_command', required=True)
+
+    badcase_list = badcase_sub.add_parser(
+        'list', help='List recent local bad cases.')
+    badcase_list.add_argument('--chat', type=normalize_chat_id)
+    badcase_list.add_argument('--type')
+    badcase_list.add_argument('--reason')
+    badcase_list.add_argument('--limit', type=int, default=20)
+    badcase_list.add_argument('--json', action='store_true')
+
+    badcase_export = badcase_sub.add_parser(
+        'export', help='Export local bad cases as JSONL or JSON.')
+    badcase_export.add_argument('--chat', type=normalize_chat_id)
+    badcase_export.add_argument('--type')
+    badcase_export.add_argument('--reason')
+    badcase_export.add_argument('--limit', type=int)
+    badcase_export.add_argument('--json', action='store_true')
 
     return parser
 
@@ -737,6 +829,7 @@ def _daemon_status_payload(config):
     counts = daemon_store.queue_counts(_daemon_path(config, 'queue'))
     lock_path = _daemon_path(config, 'lock')
     return {
+        'account_name': getattr(config, 'account_name', '') or '',
         'paused': bool(safety.load_state(config).get('paused')),
         'running': bool(status.get('running')),
         'stop_requested': bool(status.get('stop_requested')),
@@ -823,6 +916,7 @@ async def _cmd_daemon(args, config):
             raise safety.SafetyError(
                 'Message contains forbidden/sensitive profile term(s): {}.'.format(
                     ', '.join(matches)))
+        validate_agent_reply_parts(task_config, text)
         if args.dry_run:
             safety.audit_record(
                 task_config, 'daemon_reply', chat_id,
@@ -889,7 +983,9 @@ async def _cmd_quota(args, config):
             _resolve_profile(config, args.preset)
         for target in targets:
             safety.require_allowed_chat(config, target['chat_id'])
-        payload = store.create_run(state_path, targets, preset=args.preset)
+        payload = _create_quota_run(
+            store, state_path, targets, preset=args.preset,
+            account_name=getattr(config, 'account_name', '') or '')
         if args.json:
             print(dumps_json(payload))
         else:
@@ -1005,7 +1101,86 @@ async def _cmd_quota(args, config):
                 args.task_id, len(message_ids)))
         return
 
+    if args.quota_command == 'skip':
+        skip_task = getattr(store, 'skip_task', None)
+        if skip_task is None:
+            raise TelegramCliError('Quota module does not expose skip_task.')
+        skipped = skip_task(
+            state_path, args.task_id, reason=args.reason or 'skipped')
+        if skipped is None:
+            raise TelegramCliError(
+                'Quota task is not pending or was not found: {}'.format(
+                    args.task_id))
+        payload = {'skipped': True, 'task': skipped}
+        if args.json:
+            print(dumps_json(payload))
+        else:
+            print('Skipped quota task {}.'.format(args.task_id))
+        return
+
     raise AssertionError(args.quota_command)
+
+
+async def _cmd_scenario(args, config):
+    path = args.path
+
+    if args.scenario_command == 'list':
+        items = scenario_store.load_scenarios(path)
+        payload = {
+            'path': str(path),
+            'scenarios': items,
+        }
+        if args.json:
+            print(dumps_json(payload))
+        else:
+            for item in items:
+                print('{} chat={} account={} persona={} target={} preset={}'.format(
+                    item['name'], item['chat_id'], item['account'],
+                    item['persona'], item['target_messages'], item['preset']))
+        return
+
+    if args.scenario_command == 'show':
+        scenario = scenario_store.get_scenario(path, args.name)
+        payload = {
+            'path': str(path),
+            'scenario': scenario,
+        }
+        if args.json:
+            print(dumps_json(payload))
+        else:
+            print(dumps_json(scenario))
+        return
+
+    if args.scenario_command == 'start':
+        scenario = scenario_store.get_scenario(path, args.name)
+        _resolve_profile(config, scenario['preset'])
+        chat_id = int(normalize_chat_id(scenario['chat_id']))
+        scenario = dict(scenario)
+        scenario['chat_id'] = chat_id
+        safety.require_allowed_chat(config, chat_id)
+        targets = [{
+            'chat_id': chat_id,
+            'target_count': int(scenario['target_messages']),
+        }]
+        store = _quota_module()
+        payload = _create_quota_run(
+            store,
+            _quota_state_path(config), targets,
+            preset=scenario['preset'], scenario=scenario,
+            account_name=getattr(config, 'account_name', '') or '')
+        result = {
+            'path': str(path),
+            'scenario': scenario,
+            'quota': payload,
+        }
+        if args.json:
+            print(dumps_json(result))
+        else:
+            print('Started scenario {} as quota run {}.'.format(
+                scenario['name'], payload.get('run_id', 'unknown')))
+        return
+
+    raise AssertionError(args.scenario_command)
 
 
 async def _cmd_memory(args, config):
@@ -1060,15 +1235,94 @@ async def _cmd_memory(args, config):
     raise AssertionError(args.memory_command)
 
 
+async def _cmd_badcase(args, config):
+    records = bad_case_store.list_bad_cases(
+        config,
+        chat_id=getattr(args, 'chat', None),
+        case_type=getattr(args, 'type', None),
+        reason=getattr(args, 'reason', None),
+        limit=getattr(args, 'limit', 20))
+    payload = {
+        'records': records,
+        'path': str((getattr(config, 'bad_cases', {}) or {}).get('path') or ''),
+    }
+
+    if args.badcase_command == 'list':
+        if args.json:
+            print(dumps_json(payload))
+        else:
+            for item in records:
+                print('[{id}] chat={chat_id} {case_type}/{reason} source={source}: {lesson}'.format(
+                    id=item.get('id'),
+                    chat_id=item.get('chat_id') or 'none',
+                    case_type=item.get('case_type') or 'bad_case',
+                    reason=item.get('reason') or 'unknown',
+                    source=item.get('source') or 'unknown',
+                    lesson=item.get('lesson') or '',
+                ))
+        return
+
+    if args.badcase_command == 'export':
+        if args.json:
+            print(dumps_json(payload))
+        else:
+            text = bad_case_store.dumps_jsonl(records)
+            if text:
+                print(text)
+        return
+
+    raise AssertionError(args.badcase_command)
+
+
 def _status_payload(config):
     state = safety.load_state(config)
     return {
+        'account_name': getattr(config, 'account_name', '') or '',
         'paused': bool(state.get('paused')),
         'allowed_chats': list(config.allowed_chats),
         'session_path': str(config.session_path),
         'state_path': str(config.state_path),
         'audit_log_path': str(config.audit_log_path),
     }
+
+
+def _print_config_inspect(payload):
+    print('account_name={}'.format(payload.get('account_name') or '-'))
+    print('config_path={}'.format(payload.get('config_path') or '-'))
+    print('allowed_chats={}'.format(
+        ','.join(str(x) for x in payload.get('allowed_chats') or []) or 'none'))
+    for field_name, path in sorted(payload.get('runtime_paths', {}).items()):
+        print('{}={}'.format(field_name, path))
+
+
+def _print_config_doctor(payload):
+    print('ok={}'.format(str(bool(payload.get('ok'))).lower()))
+    for finding in payload.get('findings') or []:
+        print('[{}] {}: {}'.format(
+            finding.get('severity'), finding.get('code'),
+            finding.get('message')))
+
+
+def _cmd_config(args, config):
+    if args.config_command == 'inspect':
+        payload = account_isolation.inspect_config(config)
+        if args.json:
+            _print_json(payload)
+        else:
+            _print_config_inspect(payload)
+        return 0
+    if args.config_command == 'doctor':
+        other_configs = [
+            load_config(path, require_credentials=False)
+            for path in args.other_config
+        ]
+        payload = account_isolation.doctor_configs(config, other_configs)
+        if args.json:
+            _print_json(payload)
+        else:
+            _print_config_doctor(payload)
+        return 0 if payload['ok'] else 1
+    raise AssertionError(args.config_command)
 
 
 def main(argv=None):
@@ -1085,6 +1339,8 @@ def main(argv=None):
 
     try:
         config = load_config(args.config, require_credentials=require_credentials)
+        if args.command == 'config':
+            return _cmd_config(args, config)
         if args.command == 'pause':
             safety.set_paused(config, True)
             print('Paused.')
@@ -1119,12 +1375,19 @@ def main(argv=None):
             _run(_cmd_daemon(args, config))
         elif args.command == 'quota':
             _run(_cmd_quota(args, config))
+        elif args.command == 'scenario':
+            _run(_cmd_scenario(args, config))
         elif args.command == 'memory':
             _run(_cmd_memory(args, config))
+        elif args.command == 'badcase':
+            _run(_cmd_badcase(args, config))
         else:
             parser.error('unknown command {}'.format(args.command))
         return 0
-    except (ConfigError, SafetyError, TelegramCliError, daemon_store.DaemonLockError) as exc:
+    except (
+            ConfigError, SafetyError, TelegramCliError,
+            scenario_store.ScenarioConfigError,
+            daemon_store.DaemonLockError) as exc:
         print('error: {}'.format(exc), file=sys.stderr)
         return 2
     except sqlite3.OperationalError as exc:

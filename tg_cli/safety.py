@@ -111,6 +111,7 @@ def audit_record(config, action, chat_id, chat_title=None, text=None,
     config.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         'ts': _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
+        'account_name': getattr(config, 'account_name', '') or '',
         'action': action,
         'chat_id': int(chat_id) if chat_id is not None else None,
         'chat_title': chat_title,

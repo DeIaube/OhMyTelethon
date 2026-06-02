@@ -110,6 +110,20 @@ def test_create_task_can_include_character_actions_evaluators_and_memory():
     assert task['action'] == 'reply'
 
 
+def test_create_task_can_include_account_name():
+    task = daemon.create_task(
+        chat={'id': 1, 'title': 'chat'},
+        messages=[],
+        profile={},
+        persona={},
+        reply_policy={},
+        initiative={},
+        account_name='account-a',
+        now='2026-06-01T00:00:00+00:00')
+
+    assert task['account_name'] == 'account-a'
+
+
 def test_append_task_respects_max_pending(tmp_path):
     queue_path = tmp_path / 'queue.json'
     first = make_task(now='2026-06-01T00:00:00+00:00')

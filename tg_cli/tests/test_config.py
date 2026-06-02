@@ -1,12 +1,14 @@
 import json
+from pathlib import Path
 
 import pytest
 
 from tg_cli.config import (
     DEFAULT_DAEMON, DEFAULT_INITIATIVE, DEFAULT_PERSONA, DEFAULT_PROFILE,
     DEFAULT_QUOTA, DEFAULT_REPLY_POLICY, DEFAULT_ROUND, DEFAULT_MEMORY,
-    ConfigError, load_config, normalize_chat_id, normalize_daemon,
-    normalize_memory, normalize_quota, normalize_round, parse_chat_ids,
+    DEFAULT_BAD_CASES, ConfigError, load_config, normalize_bad_cases,
+    normalize_chat_id, normalize_daemon, normalize_memory, normalize_quota,
+    normalize_round, parse_chat_ids,
 )
 
 
@@ -51,6 +53,74 @@ def test_load_config_prefers_environment_over_file(tmp_path):
     assert config.audit_log_path == (tmp_path / 'env-audit.log').resolve()
 
 
+def test_load_config_accepts_account_name_from_file_and_env(tmp_path):
+    config_path = tmp_path / 'account-a.json'
+    config_path.write_text(json.dumps({
+        'account_name': 'file-account',
+        'session_path': 'file.session',
+        'allowed_chats': [1],
+    }), encoding='utf-8')
+
+    file_config = load_config(config_path, env={}, cwd=tmp_path)
+    env_config = load_config(
+        config_path, env={'TG_CLI_ACCOUNT': 'env-account'}, cwd=tmp_path)
+
+    assert file_config.account_name == 'file-account'
+    assert env_config.account_name == 'env-account'
+
+
+def test_load_config_rejects_blank_account_name(tmp_path):
+    config_path = tmp_path / 'account-a.json'
+    config_path.write_text(json.dumps({
+        'account_name': '   ',
+        'session_path': 'file.session',
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='account_name must not be blank'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+
+def test_explicit_config_relative_paths_resolve_against_config_directory(
+        tmp_path):
+    config_dir = tmp_path / 'tg_cli' / 'accounts'
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / 'account-a.json'
+    config_path.write_text(json.dumps({
+        'account_name': 'account-a',
+        'session_path': 'account-a.session',
+        'state_path': 'account-a.state.json',
+        'audit_log_path': 'account-a.audit.log',
+        'allowed_chats': [5217114569],
+        'daemon': {
+            'queue_path': 'account-a.daemon-queue.json',
+            'lock_path': 'account-a.daemon.lock',
+            'status_path': 'account-a.daemon-status.json',
+        },
+        'quota': {'state_path': 'account-a.quota-state.json'},
+        'memory': {'path': 'account-a.memory.sqlite3'},
+        'bad_cases': {'path': 'account-a.bad-cases.jsonl'},
+    }), encoding='utf-8')
+
+    config = load_config(config_path, env={}, cwd=tmp_path)
+
+    assert config.session_path == (config_dir / 'account-a.session').resolve()
+    assert config.state_path == (config_dir / 'account-a.state.json').resolve()
+    assert config.audit_log_path == (
+        config_dir / 'account-a.audit.log').resolve()
+    assert config.daemon['queue_path'] == (
+        config_dir / 'account-a.daemon-queue.json').resolve()
+    assert config.daemon['lock_path'] == (
+        config_dir / 'account-a.daemon.lock').resolve()
+    assert config.daemon['status_path'] == (
+        config_dir / 'account-a.daemon-status.json').resolve()
+    assert config.quota['state_path'] == (
+        config_dir / 'account-a.quota-state.json').resolve()
+    assert config.memory['path'] == (
+        config_dir / 'account-a.memory.sqlite3').resolve()
+    assert config.bad_cases['path'] == (
+        config_dir / 'account-a.bad-cases.jsonl').resolve()
+
+
 def test_load_config_requires_credentials_when_requested(tmp_path):
     with pytest.raises(ConfigError):
         load_config(env={}, cwd=tmp_path, require_credentials=True)
@@ -78,6 +148,13 @@ def test_load_config_supplies_profile_defaults_when_omitted(tmp_path):
         tmp_path / 'tg_cli' / '.tg-cli-memory.sqlite3').resolve()
     assert config.memory['max_task_memories'] == DEFAULT_MEMORY['max_task_memories']
     assert DEFAULT_MEMORY['path'] is None
+    assert config.bad_cases['enabled'] is True
+    assert config.bad_cases['path'] == (
+        tmp_path / 'tg_cli' / '.tg-cli-bad-cases.jsonl').resolve()
+    assert config.bad_cases['max_records'] == DEFAULT_BAD_CASES['max_records']
+    assert config.bad_cases['max_task_bad_cases'] == (
+        DEFAULT_BAD_CASES['max_task_bad_cases'])
+    assert DEFAULT_BAD_CASES['path'] is None
     assert config.reply_policy == DEFAULT_REPLY_POLICY
     assert config.initiative == DEFAULT_INITIATIVE
     assert config.persona == DEFAULT_PERSONA
@@ -106,6 +183,9 @@ def test_load_config_merges_social_policy_defaults_with_file_values(tmp_path):
             'min_start_after': '20',
             'avoid_when_active': False,
             'recent_window': '120',
+            'self_context_guard': False,
+            'self_context_recent': '4',
+            'self_context_max_trailing_own': '3',
             'topic_sources': 'recent_messages',
             'allow_topic_shift': True,
             'topic_shift_when': 'unsafe context',
@@ -137,6 +217,9 @@ def test_load_config_merges_social_policy_defaults_with_file_values(tmp_path):
     assert config.initiative['min_start_after'] == 20.0
     assert config.initiative['avoid_when_active'] is False
     assert config.initiative['recent_window'] == 120.0
+    assert config.initiative['self_context_guard'] is False
+    assert config.initiative['self_context_recent'] == 4
+    assert config.initiative['self_context_max_trailing_own'] == 3
     assert config.initiative['topic_sources'] == ['recent_messages']
     assert config.initiative['allow_topic_shift'] is True
     assert config.initiative['topic_shift_when'] == ['unsafe context']
@@ -181,6 +264,7 @@ def test_load_config_merges_round_defaults_with_file_values(tmp_path):
             'quiet_context': True,
             'split_long_replies': True,
             'split_max_chars': 24,
+            'min_reply_chars': 9,
         },
     }), encoding='utf-8')
 
@@ -191,6 +275,7 @@ def test_load_config_merges_round_defaults_with_file_values(tmp_path):
     assert config.round['quiet_context'] is True
     assert config.round['split_long_replies'] is True
     assert config.round['split_max_chars'] == 24
+    assert config.round['min_reply_chars'] == 9
     assert config.round['max_replies'] == DEFAULT_ROUND['max_replies']
 
 
@@ -225,7 +310,7 @@ def test_load_config_merges_daemon_defaults_with_file_values(tmp_path):
     assert config.daemon['max_task_context'] == 5
     assert config.daemon['min_reply_interval'] == 7.0
     assert config.daemon['max_messages_per_hour'] == 9
-    assert config.daemon['max_consecutive_replies'] == 2
+    assert 'max_consecutive_replies' not in config.daemon
     assert config.daemon['stale_lock_after'] == 30.0
 
 
@@ -241,6 +326,27 @@ def test_load_config_merges_quota_defaults_with_file_values(tmp_path):
 
     assert config.quota['state_path'] == (
         tmp_path / 'quota-state.json').resolve()
+
+
+def test_load_config_merges_bad_cases_defaults_with_file_values(tmp_path):
+    config_path = tmp_path / '.tg-cli.json'
+    config_path.write_text(json.dumps({
+        'bad_cases': {
+            'enabled': False,
+            'path': 'bad-cases.jsonl',
+            'max_records': '25',
+            'max_task_bad_cases': '4',
+            'recent_days': '7',
+        },
+    }), encoding='utf-8')
+
+    config = load_config(config_path, env={}, cwd=tmp_path)
+
+    assert config.bad_cases['enabled'] is False
+    assert config.bad_cases['path'] == (tmp_path / 'bad-cases.jsonl').resolve()
+    assert config.bad_cases['max_records'] == 25
+    assert config.bad_cases['max_task_bad_cases'] == 4
+    assert config.bad_cases['recent_days'] == 7
 
 
 def test_load_config_presets_resolve_over_global_profile_and_round(tmp_path):
@@ -336,6 +442,9 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
                     'cooldown': 15,
                     'avoid_when_active': False,
                     'recent_window': 90,
+                    'self_context_guard': True,
+                    'self_context_recent': 5,
+                    'self_context_max_trailing_own': 2,
                     'topics': 'music',
                     'allow_topic_shift': True,
                     'topic_shift_when': 'unsafe',
@@ -367,7 +476,6 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
     assert config.presets['social']['daemon'] == {
         'min_reply_interval': 2.0,
         'max_messages_per_hour': 240,
-        'max_consecutive_replies': 4,
     }
     assert config.presets['social']['reply_policy'] == {
         'reply_threshold': 0.9,
@@ -378,6 +486,9 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
         'cooldown': 15.0,
         'avoid_when_active': False,
         'recent_window': 90.0,
+        'self_context_guard': True,
+        'self_context_recent': 5,
+        'self_context_max_trailing_own': 2,
         'topics': ['music'],
         'allow_topic_shift': True,
         'topic_shift_when': ['unsafe'],
@@ -403,6 +514,9 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
     assert initiative['cooldown'] == 15.0
     assert initiative['avoid_when_active'] is False
     assert initiative['recent_window'] == 90.0
+    assert initiative['self_context_guard'] is True
+    assert initiative['self_context_recent'] == 5
+    assert initiative['self_context_max_trailing_own'] == 2
     assert initiative['topics'] == ['music']
     assert initiative['allow_topic_shift'] is True
     assert initiative['topic_shift_when'] == ['unsafe']
@@ -418,7 +532,7 @@ def test_load_config_presets_resolve_over_global_social_policy(tmp_path):
     assert character['evaluators'] == ['not_everything', 'cooldown', 'no_identity_claims']
     assert daemon['min_reply_interval'] == 2.0
     assert daemon['max_messages_per_hour'] == 240
-    assert daemon['max_consecutive_replies'] == 4
+    assert 'max_consecutive_replies' not in daemon
     assert config.resolve_daemon(None)['min_reply_interval'] == 6.0
     assert config.resolve_daemon(None)['max_messages_per_hour'] == 20
 
@@ -574,6 +688,25 @@ def test_load_config_rejects_invalid_social_policy_values_with_paths(tmp_path):
         load_config(config_path, env={}, cwd=tmp_path)
 
     config_path.write_text(json.dumps({
+        'initiative': {
+            'self_context_recent': 0,
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(ConfigError, match='initiative.self_context_recent'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+    config_path.write_text(json.dumps({
+        'initiative': {
+            'self_context_max_trailing_own': 0,
+        },
+    }), encoding='utf-8')
+
+    with pytest.raises(
+            ConfigError, match='initiative.self_context_max_trailing_own'):
+        load_config(config_path, env={}, cwd=tmp_path)
+
+    config_path.write_text(json.dumps({
         'reply_policy': {
             'reply_threshold': -0.1,
         },
@@ -611,3 +744,59 @@ def test_normalize_memory_rejects_invalid_values():
         normalize_memory({'path': 123})
     with pytest.raises(ConfigError, match='memory.max_task_memories'):
         normalize_memory({'max_task_memories': -1})
+
+
+def test_normalize_bad_cases_rejects_invalid_values():
+    with pytest.raises(ConfigError, match='bad_cases must contain a JSON object'):
+        normalize_bad_cases(['not-object'])
+    with pytest.raises(ConfigError, match='bad_cases.path'):
+        normalize_bad_cases({'path': 123})
+    with pytest.raises(ConfigError, match='bad_cases.max_records'):
+        normalize_bad_cases({'max_records': -1})
+    with pytest.raises(ConfigError, match='bad_cases.max_task_bad_cases'):
+        normalize_bad_cases({'max_task_bad_cases': -1})
+    with pytest.raises(ConfigError, match='bad_cases.recent_days'):
+        normalize_bad_cases({'recent_days': -1})
+
+
+def test_chat_social_templates_are_more_outgoing():
+    tg_cli_root = Path(__file__).resolve().parents[1]
+    for relative in (
+            'tg-cli.example.json',
+            'docs/local-profile-template.json'):
+        data = json.loads((tg_cli_root / relative).read_text(encoding='utf-8'))
+        social = data['presets']['chat_social']
+
+        assert data['bad_cases']['enabled'] is True
+        assert data['bad_cases']['path'] == '.tg-cli-bad-cases.jsonl'
+        assert data['bad_cases']['max_task_bad_cases'] == 3
+        assert social['reply_policy']['reply_threshold'] == 0.25
+        assert social['round']['reply_probability'] == 0.88
+        assert social['round']['max_replies'] == 16
+        assert social['round']['min_reply_interval'] == 4
+        assert social['round']['min_reply_chars'] == 7
+        assert social['round']['split_max_parts'] == 5
+        assert social['initiative']['min_starts'] == 4
+        assert social['initiative']['active_threshold'] == 14
+        assert social['initiative']['max_starts'] == 6
+        assert social['initiative']['self_context_guard'] is True
+        assert social['initiative']['self_context_recent'] == 6
+        assert social['initiative']['self_context_max_trailing_own'] == 2
+        assert 'adult-service solicitation' in social['initiative']['topic_shift_when']
+        assert 'bot notice' in social['initiative']['topic_shift_when']
+        assert 'private/incomplete banter' in social['initiative']['topic_shift_when']
+        assert 'grey area' not in social['reply_policy']['skip_when']
+        assert 'actual account/black-market topics' in (
+            social['reply_policy']['skip_when'])
+        assert any(
+            'trusted-test in-group banter is okay' in rule
+            for rule in social['reply_policy']['style_rules'])
+        assert any(
+            'light adult banter can get a short non-explicit reaction' in rule
+            for rule in social['reply_policy']['style_rules'])
+        assert any(
+            'safe topic pivot instead of silence' in rule
+            for rule in social['reply_policy']['style_rules'])
+        assert '旁路引题' in social['persona']['traits']
+        assert 'max_consecutive_replies' not in social['daemon']
+        assert social['daemon']['max_messages_per_hour'] == 90

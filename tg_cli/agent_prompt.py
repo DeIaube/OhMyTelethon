@@ -37,9 +37,20 @@ def _memory(memory):
     return '\n'.join(lines) if lines else '- none'
 
 
+def _bad_cases(bad_cases):
+    lines = []
+    for item in bad_cases or []:
+        lines.append('- {case_type}/{reason}: {lesson}'.format(
+            case_type=item.get('case_type', 'bad_case'),
+            reason=item.get('reason', 'unknown'),
+            lesson=item.get('lesson', ''),
+        ))
+    return '\n'.join(lines) if lines else '- none'
+
+
 def build_operator_prompt(operator, task_kind, profile, persona, reply_policy,
                           initiative, character=None, memory=None,
-                          recent_messages=None, action=None):
+                          bad_cases=None, recent_messages=None, action=None):
     character = character or {}
     persona = persona or {}
     return '\n'.join([
@@ -57,6 +68,8 @@ def build_operator_prompt(operator, task_kind, profile, persona, reply_policy,
         _lines('evaluators', character.get('evaluators') or []),
         'memory',
         _memory(memory),
+        'bad_cases',
+        _bad_cases(bad_cases),
         'recent_messages',
         _messages(recent_messages),
         '规则：如果不适合回复，输出空内容。适合回复时，只输出要发送的消息文本，不要解释。',
@@ -66,7 +79,7 @@ def build_operator_prompt(operator, task_kind, profile, persona, reply_policy,
 
 def build_initiative_prompt(profile, persona, reply_policy, initiative,
                             character=None, memory=None, idle_seconds=0,
-                            recent_messages=None):
+                            bad_cases=None, recent_messages=None):
     return '\n'.join([
         'initiative',
         'idle_seconds={}'.format(int(float(idle_seconds or 0))),
@@ -79,6 +92,7 @@ def build_initiative_prompt(profile, persona, reply_policy, initiative,
             initiative=initiative,
             character=character,
             memory=memory,
+            bad_cases=bad_cases,
             recent_messages=recent_messages,
             action='initiative',
         ),

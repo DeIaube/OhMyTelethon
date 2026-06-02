@@ -171,6 +171,52 @@ def test_evaluator_skips_anti_spam_signal():
     assert decision['reason'] == 'anti_spam_signal'
 
 
+def test_evaluator_skips_ambient_moderation_without_stop_signal():
+    decision = evaluate_message_batch(
+        text='eu，你被管理员警告一次，请遵守群规范',
+        round_config={'reply_probability': 1.0},
+        reply_policy={},
+        initiative={},
+        character={'actions': ['reply']},
+        me_names=['lu'],
+    )
+
+    assert decision['should_prompt'] is False
+    assert decision['reason'] == 'ambient_moderation_warning'
+    assert decision['action'] == 'skip'
+    assert 'stop' not in decision
+    assert 'cooldown' not in decision
+
+
+def test_evaluator_marks_direct_moderation_warning_when_named():
+    decision = evaluate_message_batch(
+        text='lu，你被管理员警告一次，请遵守群规范',
+        round_config={'reply_probability': 1.0},
+        reply_policy={},
+        initiative={},
+        character={'actions': ['reply']},
+        me_names=['lu'],
+    )
+
+    assert decision['should_prompt'] is False
+    assert decision['reason'] == 'direct_moderation_warning'
+    assert decision['action'] == 'skip'
+
+
+def test_evaluator_marks_direct_moderation_warning_when_mentioned():
+    decision = evaluate_message_batch(
+        text='你被管理员警告一次，请遵守群规范',
+        round_config={'reply_probability': 0.0, 'mention_reply_probability': 1.0},
+        reply_policy={},
+        initiative={},
+        character={'actions': ['reply']},
+        mentions_me=True,
+    )
+
+    assert decision['should_prompt'] is False
+    assert decision['reason'] == 'direct_moderation_warning'
+
+
 def test_evaluator_skips_adult_service_signal():
     decision = evaluate_message_batch(
         text='精选榜老师 可约 上门',
@@ -184,6 +230,19 @@ def test_evaluator_skips_adult_service_signal():
     assert decision['reason'] == 'adult_service'
     assert 'cooldown' not in decision
     assert 'cooldown_until' not in decision
+
+
+def test_evaluator_allows_light_adult_banter():
+    decision = evaluate_message_batch(
+        text='看嗯了哈哈哈',
+        round_config={'reply_probability': 1.0, 'skip_short_ack': False},
+        reply_policy={},
+        initiative={},
+        character={'actions': ['reply']},
+    )
+
+    assert decision['should_prompt'] is True
+    assert decision['action'] == 'reply'
 
 
 def test_evaluator_skips_nonconsensual_recording_signal():

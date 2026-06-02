@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tg_cli import bad_cases as bad_case_store
 from tg_cli import cli
 from tg_cli.config import AppConfig
 
@@ -15,11 +16,27 @@ def test_status_json_does_not_require_credentials(tmp_path, monkeypatch, capsys)
 
     assert code == 0
     data = json.loads(capsys.readouterr().out)
+    assert data['account_name'] == ''
     assert data['paused'] is False
     assert data['allowed_chats'] == []
     assert data['session_path'].endswith('printer.session')
     assert data['state_path'].endswith('tg_cli/.tg-cli-state.json')
     assert data['audit_log_path'].endswith('tg_cli/tg-cli.audit.log')
+
+
+def test_status_json_includes_account_name(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / 'account-a.json'
+    config_path.write_text(json.dumps({
+        'account_name': 'account-a',
+        'session_path': 'account-a.session',
+    }), encoding='utf-8')
+
+    code = cli.main(['--config', str(config_path), 'status', '--json'])
+
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data['account_name'] == 'account-a'
 
 
 def test_pause_and_resume_update_state(tmp_path, monkeypatch, capsys):
@@ -73,6 +90,82 @@ def test_main_reports_session_database_lock(monkeypatch, tmp_path, capsys):
     assert code == 2
     assert 'Telegram session database is locked' in captured.err
     assert 'same session' in captured.err
+
+
+def test_config_parser_accepts_inspect_and_doctor():
+    parser = cli.build_parser()
+
+    inspect_args = parser.parse_args(['config', 'inspect', '--json'])
+    doctor_args = parser.parse_args([
+        '--config', 'account-a.json',
+        'config', 'doctor',
+        '--other-config', 'account-b.json',
+        '--json',
+    ])
+
+    assert inspect_args.command == 'config'
+    assert inspect_args.config_command == 'inspect'
+    assert inspect_args.json is True
+    assert doctor_args.command == 'config'
+    assert doctor_args.config_command == 'doctor'
+    assert doctor_args.other_config == ['account-b.json']
+    assert doctor_args.json is True
+
+
+def test_config_inspect_json_outputs_account_and_paths(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / 'account-a.json'
+    config_path.write_text(json.dumps({
+        'account_name': 'account-a',
+        'session_path': 'account-a.session',
+        'state_path': 'account-a.state.json',
+        'audit_log_path': 'account-a.audit.log',
+        'allowed_chats': [5217114569],
+    }), encoding='utf-8')
+
+    code = cli.main([
+        '--config', str(config_path), 'config', 'inspect', '--json'])
+
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data['account_name'] == 'account-a'
+    assert data['allowed_chats'] == [5217114569]
+    assert data['runtime_paths']['session_path'].endswith('account-a.session')
+
+
+def test_config_doctor_json_reports_shared_paths(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    a_path = tmp_path / 'account-a.json'
+    b_path = tmp_path / 'account-b.json'
+    shared_session = str(tmp_path / 'shared.session')
+    a_path.write_text(json.dumps({
+        'account_name': 'account-a',
+        'session_path': shared_session,
+        'state_path': 'a.state.json',
+        'audit_log_path': 'a.audit.log',
+    }), encoding='utf-8')
+    b_path.write_text(json.dumps({
+        'account_name': 'account-b',
+        'session_path': shared_session,
+        'state_path': 'b.state.json',
+        'audit_log_path': 'b.audit.log',
+    }), encoding='utf-8')
+
+    code = cli.main([
+        '--config', str(a_path),
+        'config', 'doctor',
+        '--other-config', str(b_path),
+        '--json',
+    ])
+
+    assert code == 1
+    data = json.loads(capsys.readouterr().out)
+    assert data['ok'] is False
+    assert any(
+        finding['code'] == 'shared_runtime_path'
+        for finding in data['findings'])
 
 
 def test_game_round_parser_defaults():
@@ -167,6 +260,28 @@ def test_quota_parser_accepts_run_commands():
     assert reply_args.json is True
 
 
+def test_scenario_parser_accepts_commands():
+    parser = cli.build_parser()
+
+    list_args = parser.parse_args([
+        'scenario', 'list', '--path', 'scenarios.json', '--json'])
+    show_args = parser.parse_args([
+        'scenario', 'show', 'newmei-afuan-150',
+        '--path', 'scenarios.json', '--json'])
+    start_args = parser.parse_args([
+        'scenario', 'start', 'newmei-afuan-150',
+        '--path', 'scenarios.json', '--json'])
+
+    assert list_args.command == 'scenario'
+    assert list_args.scenario_command == 'list'
+    assert list_args.path == 'scenarios.json'
+    assert list_args.json is True
+    assert show_args.scenario_command == 'show'
+    assert show_args.name == 'newmei-afuan-150'
+    assert start_args.scenario_command == 'start'
+    assert start_args.name == 'newmei-afuan-150'
+
+
 def test_memory_parser_accepts_memory_commands():
     parser = cli.build_parser()
 
@@ -190,6 +305,54 @@ def test_memory_parser_accepts_memory_commands():
     assert list_args.memory_command == 'list'
     assert list_args.chat == '123'
     assert list_args.json is True
+
+
+def test_badcase_parser_accepts_list_and_export_commands():
+    parser = cli.build_parser()
+
+    list_args = parser.parse_args([
+        'badcase', 'list', '--chat', '-1001937176825',
+        '--type', 'self_flood', '--reason', 'self_context_wait',
+        '--limit', '5', '--json',
+    ])
+    export_args = parser.parse_args(['badcase', 'export', '--json'])
+
+    assert list_args.command == 'badcase'
+    assert list_args.badcase_command == 'list'
+    assert list_args.chat == 1937176825
+    assert list_args.type == 'self_flood'
+    assert list_args.reason == 'self_context_wait'
+    assert list_args.limit == 5
+    assert list_args.json is True
+    assert export_args.badcase_command == 'export'
+    assert export_args.json is True
+
+
+def test_badcase_list_json_does_not_require_credentials(tmp_path, capsys):
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        bad_cases_config={
+            'enabled': True,
+            'path': str(tmp_path / 'bad-cases.jsonl'),
+            'max_records': 20,
+            'max_task_bad_cases': 3,
+        })
+    bad_case_store.record_bad_case(
+        config, source='daemon', reason='self_context_wait',
+        chat_id=5217114569)
+
+    args = cli.build_parser().parse_args([
+        'badcase', 'list', '--chat', '5217114569', '--json'])
+    cli._run(cli._cmd_badcase(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['records'][0]['case_type'] == 'self_flood'
+    assert payload['records'][0]['reason'] == 'self_context_wait'
 
 
 def test_memory_remember_validation_error_is_reported_without_traceback(
@@ -705,7 +868,7 @@ def test_quota_reply_dry_run_validates_without_completing_or_credentials(
     )
 
     args = cli.build_parser().parse_args([
-        'quota', 'reply', 'task-1', '来了', '--dry-run', '--json'])
+        'quota', 'reply', 'task-1', '来了兄弟们下午好', '--dry-run', '--json'])
     cli._run(cli._cmd_quota(args, config))
 
     payload = json.loads(capsys.readouterr().out)
@@ -715,6 +878,151 @@ def test_quota_reply_dry_run_validates_without_completing_or_credentials(
     assert payload['task']['status'] == 'pending'
     assert captured['get_path'] == config.quota['state_path']
     assert 'complete_path' not in captured
+
+
+def test_quota_skip_marks_task_without_credentials(
+        tmp_path, monkeypatch, capsys):
+    captured = {}
+
+    class FakeQuotaStore:
+        def skip_task(self, path, task_id, reason='skipped'):
+            captured['path'] = path
+            captured['task_id'] = task_id
+            captured['reason'] = reason
+            return {
+                'id': task_id,
+                'status': 'skipped',
+                'reason': reason,
+            }
+
+    monkeypatch.setattr(cli, 'quota_store', FakeQuotaStore())
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        quota_config={'state_path': str(tmp_path / 'quota-state.json')},
+    )
+
+    args = cli.build_parser().parse_args([
+        'quota', 'skip', 'task-1', '--reason', 'stale_context', '--json'])
+    cli._run(cli._cmd_quota(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['skipped'] is True
+    assert payload['task']['status'] == 'skipped'
+    assert payload['task']['reason'] == 'stale_context'
+    assert captured == {
+        'path': config.quota['state_path'],
+        'task_id': 'task-1',
+        'reason': 'stale_context',
+    }
+
+
+def test_scenario_list_and_show_do_not_require_credentials(
+        tmp_path, capsys):
+    path = tmp_path / 'scenarios.json'
+    path.write_text(json.dumps({
+        'scenarios': [{
+            'name': 'newmei-afuan-150',
+            'account': 'lu',
+            'chat_id': 5217114569,
+            'persona': 'afuan_social',
+            'preset': 'chat_social',
+            'target_messages': 150,
+        }],
+    }), encoding='utf-8')
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        quota_config={'state_path': str(tmp_path / 'quota-state.json')},
+    )
+
+    list_args = cli.build_parser().parse_args([
+        'scenario', 'list', '--path', str(path), '--json'])
+    cli._run(cli._cmd_scenario(list_args, config))
+    listed = json.loads(capsys.readouterr().out)
+
+    show_args = cli.build_parser().parse_args([
+        'scenario', 'show', 'newmei-afuan-150',
+        '--path', str(path), '--json'])
+    cli._run(cli._cmd_scenario(show_args, config))
+    shown = json.loads(capsys.readouterr().out)
+
+    assert listed['path'] == str(path)
+    assert listed['scenarios'][0]['target_messages'] == 150
+    assert shown['scenario']['name'] == 'newmei-afuan-150'
+    assert shown['scenario']['dry_run_first'] is True
+
+
+def test_scenario_start_creates_quota_run_with_metadata(
+        tmp_path, monkeypatch, capsys):
+    captured = {}
+    path = tmp_path / 'scenarios.json'
+    path.write_text(json.dumps([{
+        'name': 'newmei-afuan-150',
+        'account': 'lu',
+        'chat_id': 5217114569,
+        'persona': 'afuan_social',
+        'preset': 'chat_social',
+        'target_messages': 150,
+        'max_runtime_minutes': 240,
+    }]), encoding='utf-8')
+
+    class FakeQuotaStore:
+        def create_run(self, state_path, targets, preset=None, scenario=None):
+            captured['state_path'] = state_path
+            captured['targets'] = targets
+            captured['preset'] = preset
+            captured['scenario'] = scenario
+            return {
+                'run_id': 'quota-test',
+                'status': 'active',
+                'preset': preset,
+                'scenario': scenario,
+                'targets': [{
+                    'chat_id': targets[0]['chat_id'],
+                    'target_count': targets[0]['target_count'],
+                    'sent_count': 0,
+                    'status': 'active',
+                }],
+                'tasks': [],
+            }
+
+    monkeypatch.setattr(cli, 'quota_store', FakeQuotaStore())
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        quota_config={'state_path': str(tmp_path / 'quota-state.json')},
+        presets={'chat_social': {'profile': {'style': 'social'}}},
+    )
+
+    args = cli.build_parser().parse_args([
+        'scenario', 'start', 'newmei-afuan-150',
+        '--path', str(path), '--json'])
+    cli._run(cli._cmd_scenario(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['scenario']['name'] == 'newmei-afuan-150'
+    assert payload['quota']['targets'][0]['target_count'] == 150
+    assert captured['state_path'] == config.quota['state_path']
+    assert captured['targets'] == [{
+        'chat_id': 5217114569,
+        'target_count': 150,
+    }]
+    assert captured['preset'] == 'chat_social'
+    assert captured['scenario']['account'] == 'lu'
+    assert captured['scenario']['persona'] == 'afuan_social'
 
 
 def test_daemon_next_skip_and_reply_queue_lifecycle(tmp_path, monkeypatch, capsys):
@@ -751,12 +1059,12 @@ def test_daemon_next_skip_and_reply_queue_lifecycle(tmp_path, monkeypatch, capsy
     assert 'claim_expires_at' in next_payload
 
     reply_args = cli.build_parser().parse_args([
-        'daemon', 'reply', task['id'], '来了', '--json'])
+        'daemon', 'reply', task['id'], '来了兄弟们下午好', '--json'])
     cli._run(cli._cmd_daemon(reply_args, config))
     reply_payload = json.loads(capsys.readouterr().out)
     assert reply_payload['queued'] is True
     assert reply_payload['task']['status'] == 'reply_pending'
-    assert reply_payload['task']['reply_text'] == '来了'
+    assert reply_payload['task']['reply_text'] == '来了兄弟们下午好'
 
     skip_args = cli.build_parser().parse_args([
         'daemon', 'skip', task['id'], '--reason', 'changed', '--json'])
@@ -818,7 +1126,7 @@ def test_daemon_run_applies_preset_daemon_overlay(tmp_path, monkeypatch):
     assert captured['dry_run'] is True
     assert captured['daemon']['min_reply_interval'] == 2.0
     assert captured['daemon']['max_messages_per_hour'] == 240
-    assert captured['daemon']['max_consecutive_replies'] == 4
+    assert 'max_consecutive_replies' not in captured['daemon']
 
 
 def test_daemon_reply_dry_run_does_not_consume_task(tmp_path, monkeypatch, capsys):
@@ -848,7 +1156,7 @@ def test_daemon_reply_dry_run_does_not_consume_task(tmp_path, monkeypatch, capsy
     cli.daemon_store.append_task(config.daemon['queue_path'], task)
 
     reply_args = cli.build_parser().parse_args([
-        'daemon', 'reply', task['id'], '来了', '--dry-run', '--json'])
+        'daemon', 'reply', task['id'], '来了兄弟们下午好', '--dry-run', '--json'])
     cli._run(cli._cmd_daemon(reply_args, config))
 
     reply_payload = json.loads(capsys.readouterr().out)

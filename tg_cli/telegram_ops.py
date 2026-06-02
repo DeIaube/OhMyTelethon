@@ -14,6 +14,7 @@ from telethon import TelegramClient, events, utils
 from telethon.tl.types import Channel, Chat, User
 
 from .config import normalize_chat_id
+from . import bad_cases as bad_case_store
 from . import daemon as daemon_store
 from .agent_policy import evaluate_message_batch
 from .agent_prompt import build_initiative_prompt, build_operator_prompt
@@ -93,6 +94,12 @@ _NOTICE_PHRASES = (
     '置顶',
     '群公告',
     '撤回了一条消息',
+    '签到成功',
+    '积分规则',
+    '您当前的积分',
+    '严打胡乱灌水',
+    '群规范',
+    '长期监控清单',
 )
 
 
@@ -123,6 +130,27 @@ def _memory_for_task(config, chat_id, sender_id=None):
         chat_id=chat_id,
         sender_id=sender_id,
         limit=memory_config.get('max_task_memories', 8))
+
+
+def _bad_cases_for_task(config, chat_id):
+    bad_cases_config = getattr(config, 'bad_cases', {}) or {}
+    limit = int(bad_cases_config.get('max_task_bad_cases') or 0)
+    if limit <= 0:
+        return []
+    return bad_case_store.recent_bad_case_guidance(
+        config, chat_id=chat_id, limit=limit)
+
+
+def _record_bad_case(config, source, reason, chat=None, chat_id=None,
+                     preset=None, task_id=None, action=None, messages=None,
+                     reply=None, metadata=None, case_type=None, lesson=None):
+    try:
+        return bad_case_store.record_bad_case(
+            config, source=source, reason=reason, chat=chat, chat_id=chat_id,
+            preset=preset, task_id=task_id, action=action, messages=messages,
+            reply=reply, metadata=metadata, case_type=case_type, lesson=lesson)
+    except Exception:
+        return None
 
 
 def _record_memory_event(config, chat_id, message_id, sender_id, sender_name,
@@ -188,6 +216,8 @@ def _is_bot_or_notice_message(item):
     sender_lower = sender.casefold()
     text_lower = text.casefold()
     if 'bot' in sender_lower:
+        return True
+    if sender in ('锦鲤骑士',):
         return True
     return any(phrase in text_lower for phrase in _NOTICE_PHRASES)
 
@@ -290,6 +320,42 @@ def _context_notices(messages, max_messages=5):
         'count': len(notices),
         'messages': notices[-int(max_messages):],
     }
+
+
+def _initiative_context_messages(messages, max_messages=6):
+    messages = list(messages or [])
+    max_messages = max(1, int(max_messages or 6))
+    filtered = [
+        item for item in messages
+        if not _is_bot_or_notice_message(item)
+    ]
+    if filtered:
+        return filtered[-max_messages:]
+    return messages[-max_messages:]
+
+
+def _initiative_self_context_skip_reason(initiative, messages):
+    initiative = initiative or {}
+    if not initiative.get('self_context_guard', True):
+        return None
+
+    recent = _initiative_context_messages(
+        messages, initiative.get('self_context_recent') or 6)
+    if not recent:
+        return None
+
+    max_trailing_own = max(
+        1, int(initiative.get('self_context_max_trailing_own') or 2))
+    trailing_own = 0
+    for item in reversed(recent):
+        if (item or {}).get('out'):
+            trailing_own += 1
+            continue
+        break
+
+    if trailing_own >= max_trailing_own:
+        return 'self_context_wait'
+    return None
 
 
 def _context_summary_sentence(message_count, active_speakers, keywords,
@@ -492,6 +558,12 @@ def _format_initiative_guidance(initiative):
         'avoid_when_active={}'.format(bool(initiative.get('avoid_when_active', True))),
         'active_threshold={}'.format(initiative.get('active_threshold')),
         'recent_window={}'.format(initiative.get('recent_window')),
+        'self_context_guard={}'.format(
+            bool(initiative.get('self_context_guard', True))),
+        'self_context_recent={}'.format(
+            initiative.get('self_context_recent', 6)),
+        'self_context_max_trailing_own={}'.format(
+            initiative.get('self_context_max_trailing_own', 2)),
         'allow_topic_shift={}'.format(bool(initiative.get('allow_topic_shift'))),
     ]
     if initiative.get('topic_shift_when'):
@@ -555,7 +627,7 @@ def _initiative_allows_active_bypass(initiative, initiative_starts):
 
 def _round_instruction(profile, persona=None, reply_policy=None,
                        initiative=None, character=None, memory=None,
-                       recent_messages=None, action=None):
+                       bad_cases=None, recent_messages=None, action=None):
     return (
         'Agent instruction: decide whether a normal person would reply. '
         'If not, use empty input to skip. Reply with one natural chat reply. '
@@ -571,14 +643,15 @@ def _round_instruction(profile, persona=None, reply_policy=None,
         initiative=initiative or {},
         character=character or {},
         memory=memory or [],
+        bad_cases=bad_cases or [],
         recent_messages=recent_messages or [],
         action=action))
 
 
 def _initiative_instruction(profile, persona, reply_policy, initiative,
                             preset=None, idle_seconds=0.0, recent_messages=None,
-                            character=None, memory=None):
-    recent_messages = recent_messages or []
+                            character=None, memory=None, bad_cases=None):
+    recent_messages = _initiative_context_messages(recent_messages or [], 6)
     recent_lines = []
     for item in recent_messages[-6:]:
         recent_lines.append('[{id}] {sender}: {text}'.format(**item))
@@ -586,10 +659,12 @@ def _initiative_instruction(profile, persona, reply_policy, initiative,
     if initiative and initiative.get('allow_topic_shift'):
         topic_shift_rule = (
             'Prefer continuing a concrete harmless recent topic. '
-            'If recent context is unsafe, spammy, grey-area, unclear, or has no safe opening, do not engage that topic; '
-            'start one neutral fallback topic from fallback_topics as a casual subject change. '
+            'Light adult jokes in trusted tests may get a short non-explicit reaction or a casual pivot. '
+            'If recent context is unsafe, spammy, a bot notice, traffic redirection, real adult-service solicitation, '
+            'private/incomplete banter, unclear, or has no safe opening, ignore that context instead of freezing; '
+            'usually start one neutral fallback topic from fallback_topics as a casual subject change. '
             'Do not explain the subject change or mention the unsafe context. '
-            'Skip only when even a fallback topic would feel disruptive.'
+            'Skip only when even a fallback topic would clearly feel disruptive.'
         )
     else:
         topic_shift_rule = (
@@ -603,6 +678,7 @@ def _initiative_instruction(profile, persona, reply_policy, initiative,
         initiative=initiative,
         character=character or {},
         memory=memory or [],
+        bad_cases=bad_cases or [],
         idle_seconds=idle_seconds,
         recent_messages=recent_messages)
     return (
@@ -611,7 +687,9 @@ def _initiative_instruction(profile, persona, reply_policy, initiative,
         '{profile}.\n{persona}.\n{reply_policy}.\n{initiative}.\n'
         'Recent context:\n{recent}\n'
         '{topic_shift_rule} '
-        'Split replies only when each part adds real content; never pad, repeat yourself, or comment on chat speed just to be active. '
+        'Prefer richer copy when it sounds natural; if splitting is enabled, use multiple short messages for separate thoughts, up to the configured split_max_parts. '
+        'Every outgoing message part must be at least the configured min_reply_chars. '
+        'Never pad, repeat yourself, or comment on chat speed just to be active. '
         'Do not mention AI/Codex/Claude/operator identity. Do not advertise, moderate, summarize the group, ask private questions, or join risky topics. '
         'Output one natural reply to send, or empty input to skip.\n{operator_prompt}'
     ).format(
@@ -901,19 +979,70 @@ def _split_reply_text(text, max_chars=28, max_parts=3):
     return head
 
 
+def _reply_char_count(text):
+    return len(''.join(str(text or '').split()))
+
+
+def _min_reply_chars(config):
+    round_config = getattr(config, 'round', {}) or {}
+    return max(0, int(round_config.get('min_reply_chars') or 0))
+
+
+def _merge_short_reply_parts(parts, min_chars=0):
+    min_chars = max(0, int(min_chars or 0))
+    if min_chars <= 0:
+        return [str(part or '').strip() for part in parts
+                if str(part or '').strip()]
+    merged = []
+    buffer = ''
+    for part in parts:
+        part = str(part or '').strip()
+        if not part:
+            continue
+        if not buffer:
+            buffer = part
+            continue
+        if _reply_char_count(buffer) < min_chars:
+            buffer = '{}{}'.format(buffer, part)
+            continue
+        merged.append(buffer)
+        buffer = part
+    if buffer:
+        if merged and _reply_char_count(buffer) < min_chars:
+            merged[-1] = '{}{}'.format(merged[-1], buffer)
+        else:
+            merged.append(buffer)
+    return merged
+
+
 def _round_reply_parts(config, reply):
     round_config = getattr(config, 'round', {}) or {}
     if not round_config.get('split_long_replies'):
         return [reply.strip()] if reply.strip() else []
-    return _split_reply_text(
+    parts = _split_reply_text(
         reply,
         max_chars=round_config.get('split_max_chars', 28),
         max_parts=round_config.get('split_max_parts', 3),
     )
+    return _merge_short_reply_parts(parts, _min_reply_chars(config))
+
+
+def validate_agent_reply_parts(config, reply):
+    parts = _round_reply_parts(config, reply)
+    if not parts:
+        raise TelegramCliError('Reply text must not be empty.')
+    min_chars = _min_reply_chars(config)
+    if min_chars > 0:
+        for part in parts:
+            if _reply_char_count(part) < min_chars:
+                raise TelegramCliError(
+                    'Each agent reply message must contain at least {} non-space characters.'.format(
+                        min_chars))
+    return parts
 
 
 def _daemon_reply_parts(config, reply):
-    return _round_reply_parts(config, reply)
+    return validate_agent_reply_parts(config, reply)
 
 
 def _remaining_message_budget(report, max_replies):
@@ -1232,6 +1361,10 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 emit(
                     'Skipped: reply contains forbidden/sensitive profile term(s): {}.'.format(
                         ', '.join(matches)))
+                _record_bad_case(
+                    config, source='game_round', reason='forbidden_terms',
+                    chat=row, preset=preset_name, action=source, reply=reply,
+                    metadata={'match_count': len(matches)})
                 record_skip(source, 'forbidden_terms')
                 return []
 
@@ -1261,7 +1394,19 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 record_skip(source, 'end_buffer')
                 return []
 
-            reply_parts = _round_reply_parts(config, reply)
+            try:
+                reply_parts = validate_agent_reply_parts(config, reply)
+            except TelegramCliError as exc:
+                safety.audit_record(
+                    config, 'game_round_send', row['id'],
+                    chat_title=row['title'], text=reply,
+                    status='blocked_min_reply_chars')
+                emit('Skipped: {}.'.format(exc))
+                _record_bad_case(
+                    config, source='game_round', reason='min_reply_chars',
+                    chat=row, preset=preset_name, action=source, reply=reply)
+                record_skip(source, 'min_reply_chars')
+                return []
             if not reply_parts:
                 emit('Skipped.')
                 record_skip(source, 'empty_reply_parts')
@@ -1275,6 +1420,13 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 emit(
                     'Skipped: reply would exceed max_replies={} outbound message cap.'.format(
                         max_replies))
+                _record_bad_case(
+                    config, source='game_round', reason='max_replies',
+                    chat=row, preset=preset_name, action=source, reply=reply,
+                    metadata={
+                        'part_count': len(reply_parts),
+                        'remaining_message_budget': remaining_message_budget,
+                    })
                 record_skip(source, 'max_replies')
                 return []
 
@@ -1373,24 +1525,36 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                     last_initiative_at = now
                     return False
 
-            initiative_starts += 1
-            report.record_initiative_prompt()
             recent_context = await _recent_context_lines(
                 client, entity, min(limit, 8))
-            memory = _memory_for_task(config, row['id'])
             current_now = loop.time()
             if safety.should_stop_for_end_buffer(current_now, end_at, end_buffer):
                 emit('Skipped initiative: remaining time is below end_buffer={}s.'.format(
                     end_buffer))
                 report.record_initiative_skip('end_buffer')
                 return False
+            reason = _initiative_self_context_skip_reason(
+                initiative, recent_context)
+            if reason:
+                emit('Skipped initiative: {}.'.format(reason))
+                _record_bad_case(
+                    config, source='game_round', reason=reason,
+                    chat=row, preset=preset_name, action='initiative',
+                    messages=recent_context)
+                report.record_initiative_skip(reason)
+                last_initiative_at = current_now
+                return False
+            initiative_starts += 1
+            report.record_initiative_prompt()
+            memory = _memory_for_task(config, row['id'])
+            bad_case_items = _bad_cases_for_task(config, row['id'])
             last_initiative_at = current_now
             emit('')
             emit(_initiative_instruction(
                 profile, persona, reply_policy, initiative,
                 preset=preset_name, idle_seconds=current_now - last_activity_at,
                 recent_messages=recent_context, character=character,
-                memory=memory))
+                memory=memory, bad_cases=bad_case_items))
             safety.require_can_write(config, row['id'])
             reply = input_func(
                 'Agent initiative (empty skip, /quit stop): ').strip()
@@ -1409,6 +1573,11 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
                 last_activity_at = now_after_input
                 recent_event_times.extend([now_after_input] * len(new_ids))
                 emit('Skipped initiative: newer inbound activity arrived.')
+                _record_bad_case(
+                    config, source='game_round', reason='stale_context',
+                    chat=row, preset=preset_name, action='initiative',
+                    messages=latest_context,
+                    metadata={'new_inbound_count': len(new_ids)})
                 report.record_initiative_skip('stale_context')
                 return False
             await send_operator_text(reply, 'initiative')
@@ -1487,11 +1656,25 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
             reason = decision['reason']
             if not should_prompt:
                 emit('Skipped: {}.'.format(reason))
+                _record_bad_case(
+                    config, source='game_round', reason=reason,
+                    chat=row, preset=preset_name,
+                    action=_action_from_decision(decision),
+                    messages=[
+                        {
+                            'id': msg_id,
+                            'sender': sender_name,
+                            'out': False,
+                            'text': text,
+                        }
+                        for msg_id, sender_name, text in incoming_lines
+                    ])
                 report.record_skip(reason)
                 continue
 
             recent_for_prompt = await _recent_context_lines(client, entity, limit)
             memory = _memory_for_task(config, row['id'], latest_sender_id)
+            bad_case_items = _bad_cases_for_task(config, row['id'])
             if not quiet_context:
                 emit('Recent context:')
                 for item in recent_for_prompt:
@@ -1500,6 +1683,7 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
             emit(_round_instruction(
                 profile, persona, reply_policy, initiative=initiative,
                 character=character, memory=memory,
+                bad_cases=bad_case_items,
                 recent_messages=recent_for_prompt,
                 action=_action_from_decision(decision)))
             report.record_prompt()
@@ -1528,20 +1712,22 @@ async def interactive_round(config, chat, duration=60, limit=12, max_replies=8,
 
 def _daemon_task_prompt(profile, persona, reply_policy, round_config=None,
                         initiative=None, character=None, memory=None,
-                        recent_messages=None, action=None):
+                        bad_cases=None, recent_messages=None, action=None):
     prompt = _round_instruction(
         profile, persona, reply_policy, initiative=initiative,
-        character=character, memory=memory, recent_messages=recent_messages,
-        action=action)
+        character=character, memory=memory, bad_cases=bad_cases,
+        recent_messages=recent_messages, action=action)
     round_config = round_config or {}
     if round_config.get('split_long_replies'):
         prompt += (
             ' The running daemon may split longer replies into up to {} short '
-            'messages around {} chars each. Use this only for naturally separate '
-            'thoughts; never pad, repeat filler, or chase message count.'
+            'messages around {} chars each. Prefer richer copy when it sounds natural. '
+            'Every part must be at least {} non-space characters. Use splitting only '
+            'for naturally separate thoughts; never pad, repeat filler, or chase message count.'
         ).format(
             int(round_config.get('split_max_parts') or 3),
-            int(round_config.get('split_max_chars') or 28))
+            int(round_config.get('split_max_chars') or 28),
+            int(round_config.get('min_reply_chars') or 0))
     return prompt
 
 
@@ -1582,12 +1768,10 @@ def _daemon_parse_time(value):
     return parsed.astimezone(_dt.timezone.utc)
 
 
-def _daemon_reply_counts(queue_path, chat_id, now=None):
+def _daemon_hourly_reply_count(queue_path, chat_id, now=None):
     now = now or _dt.datetime.now(_dt.timezone.utc)
     queue = daemon_store.load_queue(queue_path)
     hourly = 0
-    consecutive = 0
-    counting_consecutive = True
     for task in reversed(queue.get('tasks', [])):
         chat = task.get('chat') or {}
         if int(chat.get('id') or 0) != int(chat_id):
@@ -1600,11 +1784,8 @@ def _daemon_reply_counts(queue_path, chat_id, now=None):
             count = len(task.get('message_ids') or []) or 1
             if (now - updated_at).total_seconds() <= 3600:
                 hourly += count
-            if counting_consecutive:
-                consecutive += count
             continue
-        counting_consecutive = False
-    return hourly, consecutive
+    return hourly
 
 
 def _daemon_retry_after(seconds, now=None):
@@ -1707,6 +1888,14 @@ def _quota_begin_task(config, task_id, expected_message_count):
     return _quota_invoke(
         config, begin_task, task_id,
         expected_message_count=int(expected_message_count))
+
+
+def _quota_skip_task(config, task_id, reason='skipped'):
+    store = _quota_module()
+    skip_task = getattr(store, 'skip_task', None)
+    if skip_task is None:
+        raise TelegramCliError('Quota module does not expose skip_task.')
+    return _quota_invoke(config, skip_task, task_id, reason=reason)
 
 
 def _quota_run_status(status):
@@ -1823,11 +2012,9 @@ def _quota_config_with_preset(config, preset_name):
     return resolved
 
 
-def _quota_reply_counts(status, chat_id, now=None):
+def _quota_hourly_reply_count(status, chat_id, now=None):
     now = now or _dt.datetime.now(_dt.timezone.utc)
     hourly = 0
-    consecutive = 0
-    counting_consecutive = True
     for task in reversed((status or {}).get('tasks') or []):
         chat = _quota_task_chat(task)
         if int(chat.get('id') or 0) != int(chat_id):
@@ -1838,13 +2025,10 @@ def _quota_reply_counts(status, chat_id, now=None):
             count = len(task.get('message_ids') or []) or 1
             if (now - updated_at).total_seconds() <= 3600:
                 hourly += count
-            if counting_consecutive:
-                consecutive += count
             continue
         if task_status in ('pending', 'sending'):
             continue
-        counting_consecutive = False
-    return hourly, consecutive
+    return hourly
 
 
 def _quota_reply_interval_delay(target, min_reply_interval, now=None):
@@ -1854,6 +2038,65 @@ def _quota_reply_interval_delay(target, min_reply_interval, now=None):
     now = now or _dt.datetime.now(_dt.timezone.utc)
     elapsed = (now - last_sent_at).total_seconds()
     return max(0.0, float(min_reply_interval or 0.0) - elapsed)
+
+
+def _quota_task_context_messages(task):
+    context = (task or {}).get('context') or {}
+    messages = context.get('messages') if isinstance(context, dict) else None
+    if messages is None:
+        messages = (task or {}).get('messages')
+    return list(messages or [])
+
+
+def _message_id_as_int(item):
+    try:
+        return int((item or {}).get('id'))
+    except (TypeError, ValueError):
+        return None
+
+
+def _quota_newer_inbound_messages(snapshot_messages, latest_messages):
+    snapshot_ids = [
+        message_id for message_id in (
+            _message_id_as_int(item) for item in snapshot_messages or [])
+        if message_id is not None
+    ]
+    if not snapshot_ids:
+        return []
+    snapshot_max_id = max(snapshot_ids)
+    newer = []
+    for item in latest_messages or []:
+        if (item or {}).get('out'):
+            continue
+        message_id = _message_id_as_int(item)
+        if message_id is not None and message_id > snapshot_max_id:
+            newer.append(item)
+    return newer
+
+
+async def _quota_preflight_stale_context(
+        config, client, entity, task_config, task, row, preset, reply):
+    snapshot_messages = _quota_task_context_messages(task)
+    if not snapshot_messages:
+        return None
+    limit = max(12, len(snapshot_messages) + 4)
+    latest_messages = await _recent_context_lines(client, entity, limit)
+    newer_inbound = _quota_newer_inbound_messages(
+        snapshot_messages, latest_messages)
+    if not newer_inbound:
+        return None
+    task_id = (task or {}).get('id')
+    _quota_skip_task(config, task_id, reason='stale_context')
+    _record_bad_case(
+        task_config, source='quota', reason='stale_context',
+        chat=row, preset=preset, task_id=task_id, action='reply',
+        messages=latest_messages, reply=reply, metadata={
+            'new_inbound_count': len(newer_inbound),
+            'latest_message_id': newer_inbound[-1].get('id'),
+        })
+    raise TelegramCliError(
+        'Quota task {} has stale context; skipped instead of sending. '
+        'Run quota next for a fresh task.'.format(task_id))
 
 
 async def quota_next_context(config, limit=12, operator='agent'):
@@ -1884,8 +2127,10 @@ async def quota_next_context(config, limit=12, operator='agent'):
         effective_config, row, messages, operator=operator, preset=preset,
         tail_limit=limit)
     memory = _memory_for_task(effective_config, row['id'])
+    bad_case_items = _bad_cases_for_task(effective_config, row['id'])
     character = copy.deepcopy(context.get('character') or _character(effective_config))
     task_context = {
+        'account_name': getattr(config, 'account_name', '') or '',
         'chat': copy.deepcopy(row),
         'operator': context['operator'],
         'preset': context['preset'],
@@ -1897,6 +2142,7 @@ async def quota_next_context(config, limit=12, operator='agent'):
         'actions': copy.deepcopy(character.get('actions') or []),
         'evaluators': copy.deepcopy(character.get('evaluators') or []),
         'memory': copy.deepcopy(memory),
+        'bad_cases': copy.deepcopy(bad_case_items),
         'action': 'decide',
         'round': copy.deepcopy(getattr(effective_config, 'round', {}) or {}),
         'prompt': _daemon_task_prompt(
@@ -1906,6 +2152,7 @@ async def quota_next_context(config, limit=12, operator='agent'):
             initiative=context['initiative'],
             character=character,
             memory=memory,
+            bad_cases=bad_case_items,
             recent_messages=context['messages_tail']),
         'messages': copy.deepcopy(context['messages_tail']),
         'context_summary': _task_context_summary(context),
@@ -1950,16 +2197,35 @@ async def quota_reply(config, task_id, text, dry_run=False):
                 task_config, 'quota_reply_send', chat_id,
                 chat_title=chat.get('title'), text=reply, dry_run=True,
                 status='blocked_forbidden_terms')
+            _record_bad_case(
+                task_config, source='quota', reason='forbidden_terms',
+                chat=chat, preset=preset, task_id=task_id,
+                action='reply', messages=(task.get('context') or {}).get('messages'),
+                reply=reply, metadata={'match_count': len(matches)})
             raise safety.SafetyError(
                 'Message contains forbidden/sensitive profile term(s): {}.'.format(
                     ', '.join(matches)))
-        reply_parts = _round_reply_parts(task_config, reply)
-        if not reply_parts:
-            raise TelegramCliError('Reply text must not be empty.')
+        try:
+            reply_parts = validate_agent_reply_parts(task_config, reply)
+        except TelegramCliError:
+            _record_bad_case(
+                task_config, source='quota', reason='min_reply_chars',
+                chat=chat, preset=preset, task_id=task_id,
+                action='reply', messages=(task.get('context') or {}).get('messages'),
+                reply=reply)
+            raise
         for part in reply_parts:
             safety.require_text_allowed(task_config, part)
         remaining = _quota_target_remaining(target)
         if len(reply_parts) > remaining:
+            _record_bad_case(
+                task_config, source='quota', reason='max_replies',
+                chat=chat, preset=preset, task_id=task_id,
+                action='reply', messages=(task.get('context') or {}).get('messages'),
+                reply=reply, metadata={
+                    'part_count': len(reply_parts),
+                    'remaining': remaining,
+                })
             raise TelegramCliError(
                 'Quota reply would exceed remaining target for chat {}: '
                 '{} part(s) for {} remaining.'.format(
@@ -1998,18 +2264,40 @@ async def quota_reply(config, task_id, text, dry_run=False):
                 task_config, 'quota_reply_send', row['id'],
                 chat_title=row['title'], text=reply, dry_run=dry_run,
                 status='blocked_forbidden_terms')
+            _record_bad_case(
+                task_config, source='quota', reason='forbidden_terms',
+                chat=row, preset=_quota_preset_name(config, current_status),
+                task_id=task_id, action='reply',
+                messages=(current_task.get('context') or {}).get('messages'),
+                reply=reply, metadata={'match_count': len(matches)})
             raise safety.SafetyError(
                 'Message contains forbidden/sensitive profile term(s): {}.'.format(
                     ', '.join(matches)))
 
-        reply_parts = _round_reply_parts(task_config, reply)
-        if not reply_parts:
-            raise TelegramCliError('Reply text must not be empty.')
+        try:
+            reply_parts = validate_agent_reply_parts(task_config, reply)
+        except TelegramCliError:
+            _record_bad_case(
+                task_config, source='quota', reason='min_reply_chars',
+                chat=row, preset=_quota_preset_name(config, current_status),
+                task_id=task_id, action='reply',
+                messages=(current_task.get('context') or {}).get('messages'),
+                reply=reply)
+            raise
         for part in reply_parts:
             safety.require_text_allowed(task_config, part)
 
         remaining = _quota_target_remaining(target)
         if len(reply_parts) > remaining:
+            _record_bad_case(
+                task_config, source='quota', reason='max_replies',
+                chat=row, preset=_quota_preset_name(config, current_status),
+                task_id=task_id, action='reply',
+                messages=(current_task.get('context') or {}).get('messages'),
+                reply=reply, metadata={
+                    'part_count': len(reply_parts),
+                    'remaining': remaining,
+                })
             raise TelegramCliError(
                 'Quota reply would exceed remaining target for chat {}: '
                 '{} part(s) for {} remaining.'.format(
@@ -2017,23 +2305,27 @@ async def quota_reply(config, task_id, text, dry_run=False):
 
         daemon_config = getattr(task_config, 'daemon', {}) or {}
         now_dt = _dt.datetime.now(_dt.timezone.utc)
-        hourly, consecutive = _quota_reply_counts(
-            current_status, row['id'], now=now_dt)
+        hourly = _quota_hourly_reply_count(current_status, row['id'], now=now_dt)
         if hourly + len(reply_parts) > int(daemon_config.get(
                 'max_messages_per_hour', 20)):
+            _record_bad_case(
+                task_config, source='quota', reason='hourly_limit',
+                chat=row, preset=_quota_preset_name(config, current_status),
+                task_id=task_id, action='reply',
+                messages=(current_task.get('context') or {}).get('messages'),
+                reply=reply, metadata={'part_count': len(reply_parts)})
             raise TelegramCliError(
                 'Quota hourly message limit reached for chat {}.'.format(
-                    row['id']))
-        if consecutive + len(reply_parts) > int(daemon_config.get(
-                'max_consecutive_replies', 2)):
-            raise TelegramCliError(
-                'Quota consecutive reply limit reached for chat {}.'.format(
                     row['id']))
         delay = _quota_reply_interval_delay(
             target, daemon_config.get('min_reply_interval', 6.0),
             now=now_dt)
         if delay > 0:
             await asyncio.sleep(delay)
+
+        await _quota_preflight_stale_context(
+            config, client, entity, task_config, current_task, row,
+            _quota_preset_name(config, current_status), reply)
 
         begun = _quota_begin_task(config, task_id, len(reply_parts))
         if begun is None:
@@ -2097,6 +2389,11 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
             queue_path, task['id'], reason='forbidden_terms')
         _record_agent_event(status_path, task.get('action') or 'reply', 'blocked',
                             reason='forbidden_terms')
+        _record_bad_case(
+            config, source='daemon', reason='forbidden_terms',
+            chat=row, preset=task.get('preset'), task_id=task.get('id'),
+            action=task.get('action') or 'reply', messages=task.get('messages'),
+            reply=reply, metadata={'match_count': len(matches)})
         emit('Skipped queued reply {}: forbidden terms.'.format(task['id']))
         return last_sent_at
 
@@ -2125,10 +2422,33 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
             queue_path, task['id'], reason='forbidden_terms')
         _record_agent_event(status_path, task.get('action') or 'reply', 'blocked',
                             reason='forbidden_terms')
+        _record_bad_case(
+            config, source='daemon', reason='forbidden_terms',
+            chat=row, preset=task.get('preset'), task_id=task.get('id'),
+            action=task.get('action') or 'reply', messages=task.get('messages'),
+            reply=reply, metadata={'match_count': len(matches)})
         emit('Skipped queued reply {}: forbidden terms.'.format(task['id']))
         return last_sent_at
 
-    reply_parts = _daemon_reply_parts(task_config, reply)
+    try:
+        reply_parts = _daemon_reply_parts(task_config, reply)
+    except TelegramCliError as exc:
+        safety.audit_record(
+            task_config, 'daemon_reply_send', row['id'],
+            chat_title=row['title'], text=reply,
+            dry_run=bool(dry_run or current_task.get('reply_dry_run')),
+            status='blocked_min_reply_chars')
+        daemon_store.skip_task(
+            queue_path, task['id'], reason='min_reply_chars')
+        _record_agent_event(status_path, task.get('action') or 'reply', 'blocked',
+                            reason='min_reply_chars')
+        _record_bad_case(
+            config, source='daemon', reason='min_reply_chars',
+            chat=row, preset=task.get('preset'), task_id=task.get('id'),
+            action=task.get('action') or 'reply', messages=task.get('messages'),
+            reply=reply)
+        emit('Skipped queued reply {}: {}.'.format(task['id'], exc))
+        return last_sent_at
     if not reply_parts:
         daemon_store.skip_task(queue_path, task['id'], reason='empty_reply_parts')
         _record_agent_event(status_path, task.get('action') or 'reply', 'skipped',
@@ -2137,22 +2457,18 @@ async def _daemon_send_reply_task(client, entity, config, row, task,
     for part in reply_parts:
         safety.require_text_allowed(task_config, part)
 
-    hourly, consecutive = _daemon_reply_counts(queue_path, row['id'])
+    hourly = _daemon_hourly_reply_count(queue_path, row['id'])
     if hourly + len(reply_parts) > int(config.daemon['max_messages_per_hour']):
         retry_after = _daemon_retry_after(60.0)
         daemon_store.hold_rate_limited_task(
             queue_path, task['id'], reason='hourly_limit',
             retry_after=retry_after)
+        _record_bad_case(
+            config, source='daemon', reason='hourly_limit',
+            chat=row, preset=task.get('preset'), task_id=task.get('id'),
+            action=task.get('action') or 'reply', messages=task.get('messages'),
+            reply=reply, metadata={'part_count': len(reply_parts)})
         emit('Queued reply {} held: hourly daemon limit reached.'.format(
-            task['id']))
-        return last_sent_at
-    if consecutive + len(reply_parts) > int(config.daemon['max_consecutive_replies']):
-        retry_after = _daemon_retry_after(
-            max(1.0, float(config.daemon['min_reply_interval'])))
-        daemon_store.hold_rate_limited_task(
-            queue_path, task['id'], reason='consecutive_limit',
-            retry_after=retry_after)
-        emit('Queued reply {} held: consecutive daemon limit reached.'.format(
             task['id']))
         return last_sent_at
 
@@ -2238,6 +2554,7 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
         lock = daemon_store.refresh_lock(lock_path, owner=owner)
         current = daemon_store.read_status(status_path)
         payload = {
+            'account_name': getattr(config, 'account_name', '') or '',
             'running': bool(running),
             'pid': os.getpid(),
             'owner': owner,
@@ -2295,6 +2612,7 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
 
         async def append_context_task(kind, prompt, messages, action=None):
             memory = _memory_for_task(config, row['id'])
+            bad_case_items = _bad_cases_for_task(config, row['id'])
             task = daemon_store.create_task(
                 chat=row,
                 messages=messages[-int(daemon_config['max_task_context']):],
@@ -2310,7 +2628,9 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
                 actions=character.get('actions'),
                 evaluators=character.get('evaluators'),
                 memory=memory,
-                action=action)
+                bad_cases=bad_case_items,
+                action=action,
+                account_name=getattr(config, 'account_name', '') or '')
             task['dry_run'] = bool(dry_run)
             appended = daemon_store.append_task(
                 queue_path, task,
@@ -2349,11 +2669,22 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
             current_now = loop.time()
             if current_now >= end_at or daemon_store.stop_requested(status_path):
                 return
+            reason = _initiative_self_context_skip_reason(
+                initiative, recent_context)
+            if reason:
+                last_initiative_at = current_now
+                _record_agent_event(status_path, 'initiative', 'skipped', reason)
+                _record_bad_case(
+                    config, source='daemon', reason=reason, chat=row,
+                    preset=preset, action='initiative', messages=recent_context)
+                emit('Skipped initiative: {}.'.format(reason))
+                return
             prompt = _initiative_instruction(
                 profile, persona, reply_policy, initiative,
                 preset=preset, idle_seconds=current_now - last_activity_at,
                 recent_messages=recent_context, character=character,
-                memory=_memory_for_task(config, row['id']))
+                memory=_memory_for_task(config, row['id']),
+                bad_cases=_bad_cases_for_task(config, row['id']))
             last_initiative_at = current_now
             if await append_context_task(
                     'initiative', prompt, recent_context,
@@ -2430,6 +2761,18 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
             reason = decision['reason']
             if not should_prompt:
                 emit('Skipped daemon task: {}.'.format(reason))
+                _record_bad_case(
+                    config, source='daemon', reason=reason, chat=row,
+                    preset=preset, action=_action_from_decision(decision),
+                    messages=[
+                        {
+                            'id': msg_id,
+                            'sender': sender_name,
+                            'out': False,
+                            'text': text,
+                        }
+                        for msg_id, sender_name, text in incoming_lines
+                    ])
                 update_status(row=row, running=True)
                 continue
 
@@ -2440,6 +2783,7 @@ async def daemon_run(config, chat, preset=None, duration=3600.0, dry_run=False,
                 profile, persona, reply_policy, round_config,
                 initiative=initiative, character=character,
                 memory=_memory_for_task(config, row['id']),
+                bad_cases=_bad_cases_for_task(config, row['id']),
                 recent_messages=recent_context,
                 action=_action_from_decision(decision))
             await append_context_task(
@@ -2471,6 +2815,7 @@ async def codex_context(config, chat, limit, operator='agent', preset=None):
             latest_sender_id = item.get('sender_id')
             break
     memory = _memory_for_task(config, row['id'], latest_sender_id)
+    bad_case_items = _bad_cases_for_task(config, row['id'])
     instruction = '你是 {}。\n{}'.format(operator, build_operator_prompt(
         operator=operator,
         task_kind='message',
@@ -2480,6 +2825,7 @@ async def codex_context(config, chat, limit, operator='agent', preset=None):
         initiative=initiative,
         character=character,
         memory=memory,
+        bad_cases=bad_case_items,
         recent_messages=messages))
     return {
         'chat': row,
@@ -2491,6 +2837,7 @@ async def codex_context(config, chat, limit, operator='agent', preset=None):
         'initiative': initiative,
         'character': character,
         'memory': memory,
+        'bad_cases': bad_case_items,
         'messages': messages,
         'instruction': instruction,
     }

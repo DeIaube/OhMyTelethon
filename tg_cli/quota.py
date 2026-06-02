@@ -25,7 +25,9 @@ DEFAULT_STATE = {
     'status': 'empty',
     'created_at': None,
     'updated_at': None,
+    'account_name': '',
     'preset': None,
+    'scenario': None,
     'targets': [],
     'tasks': [],
 }
@@ -153,7 +155,9 @@ def _normalize_state(payload):
     state.setdefault('status', 'empty')
     state.setdefault('created_at', None)
     state.setdefault('updated_at', None)
+    state.setdefault('account_name', '')
     state.setdefault('preset', None)
+    state.setdefault('scenario', None)
     state.setdefault('targets', [])
     state.setdefault('tasks', [])
     if not isinstance(state['targets'], list):
@@ -249,7 +253,8 @@ def _normalize_targets(targets):
     return normalized
 
 
-def create_run(path, targets, preset=None, now=None):
+def create_run(path, targets, preset=None, scenario=None, account_name=None,
+               now=None):
     timestamp = _iso_utc(now)
     state = {
         'version': 1,
@@ -257,7 +262,9 @@ def create_run(path, targets, preset=None, now=None):
         'status': ACTIVE_RUN_STATUS,
         'created_at': timestamp,
         'updated_at': timestamp,
+        'account_name': str(account_name or ''),
         'preset': preset,
+        'scenario': _deepcopy_json(scenario) if scenario is not None else None,
         'targets': _normalize_targets(targets),
         'tasks': [],
     }
@@ -361,6 +368,7 @@ def create_task(path, chat_id, context=None, now=None):
             'id': 'quota-task-{}-{}'.format(
                 _compact_timestamp(timestamp), uuid.uuid4().hex[:12]),
             'status': PENDING_TASK_STATUS,
+            'account_name': state.get('account_name') or '',
             'chat_id': int(chat_id),
             'context': _deepcopy_json(context),
             'created_at': timestamp,

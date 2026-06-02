@@ -54,6 +54,7 @@ def test_confirm_send_defaults_to_no():
 
 def test_audit_record_hashes_text_without_storing_raw_message(tmp_path):
     config = make_config(tmp_path)
+    config.account_name = 'account-a'
     safety.audit_record(
         config, 'send', 5217114569,
         chat_title='lu 和 王哥',
@@ -69,6 +70,7 @@ def test_audit_record_hashes_text_without_storing_raw_message(tmp_path):
     assert 'text_sha256' in data
     assert 'tg-cli 测试消息' not in line
     assert data['message_id'] == 123
+    assert data['account_name'] == 'account-a'
 
 
 def test_forbidden_terms_match_profile_terms_case_insensitively(tmp_path):

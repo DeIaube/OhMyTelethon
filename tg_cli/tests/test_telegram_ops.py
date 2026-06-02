@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from tg_cli.config import AppConfig
 from tg_cli.agent_memory import MemoryStore
+from tg_cli import bad_cases as bad_case_store
 from tg_cli import daemon
 from tg_cli import safety
 from tg_cli import telegram_ops
@@ -26,7 +27,6 @@ def make_config(tmp_path, profile=None, presets=None):
             'status_path': str(tmp_path / 'status.json'),
             'min_reply_interval': 1.0,
             'max_messages_per_hour': 20,
-            'max_consecutive_replies': 20,
         },
         quota_config={
             'state_path': str(tmp_path / 'quota.json'),
@@ -40,6 +40,7 @@ class FakeQuotaStore:
         self.task = copy.deepcopy(task) if task is not None else None
         self.created_tasks = []
         self.completed = []
+        self.skipped = []
 
     def get_status(self, path):
         return copy.deepcopy(self.status_payload)
@@ -93,6 +94,17 @@ class FakeQuotaStore:
                 if int(target.get('sent_count')) >= int(target.get('target_count')):
                     target['status'] = 'done'
         return copy.deepcopy(self.task)
+
+    def skip_task(self, path, task_id, reason='skipped'):
+        self.skipped.append({
+            'task_id': task_id,
+            'reason': reason,
+        })
+        if self.task and self.task.get('id') == task_id:
+            self.task['status'] = 'skipped'
+            self.task['reason'] = reason
+            return copy.deepcopy(self.task)
+        return None
 
 
 class FakeTelegramClient:
@@ -172,6 +184,15 @@ def test_codex_context_includes_full_profile_and_operator(monkeypatch, tmp_path)
         'avoid_topics': ['spoilers'],
         'forbidden_terms': ['classified'],
     })
+    config.bad_cases = {
+        'enabled': True,
+        'path': tmp_path / 'bad-cases.jsonl',
+        'max_records': 20,
+        'max_task_bad_cases': 2,
+    }
+    bad_case_store.record_bad_case(
+        config, source='daemon', reason='self_context_wait',
+        chat_id=5217114569)
 
     data = asyncio.run(telegram_ops.codex_context(
         config, '5217114569', 20, operator='Claude', preset='casual'))
@@ -186,6 +207,8 @@ def test_codex_context_includes_full_profile_and_operator(monkeypatch, tmp_path)
     assert data['profile']['forbidden_terms'] == ['classified']
     assert 'reply_policy' in data['profile']
     assert data['messages'][0]['text'] == 'hello'
+    assert data['bad_cases'][0]['case_type'] == 'self_flood'
+    assert 'self_flood/self_context_wait' in data['instruction']
     assert '你是 Claude' in data['instruction']
 
 
@@ -297,6 +320,15 @@ def test_quota_next_context_creates_task_with_recent_context(
                 'persona': {'identity': 'preset persona'},
             },
         })
+    config.bad_cases = {
+        'enabled': True,
+        'path': tmp_path / 'bad-cases.jsonl',
+        'max_records': 20,
+        'max_task_bad_cases': 2,
+    }
+    bad_case_store.record_bad_case(
+        config, source='daemon', reason='self_context_wait',
+        chat_id=5217114569)
     quota = FakeQuotaStore({
         'run_id': 'quota-1',
         'status': 'active',
@@ -342,6 +374,10 @@ def test_quota_next_context_creates_task_with_recent_context(
     assert data['context']['persona']['identity'] == 'preset persona'
     assert data['context']['round']['split_long_replies'] is True
     assert data['context']['quota']['remaining'] == 2
+    assert data['context']['bad_cases'][0]['case_type'] == 'self_flood'
+    assert quota.created_tasks[0]['context']['bad_cases'][0]['reason'] == (
+        'self_context_wait')
+    assert 'self_flood/self_context_wait' in data['context']['prompt']
     assert data['context']['messages'][-1]['text'] == '开黑开黑'
     assert 'prompt' in data['context']
     assert quota.created_tasks[0]['context']['context_summary']['message_count'] == 2
@@ -351,7 +387,7 @@ def test_quota_reply_dry_run_validates_without_completing_or_sending(
         tmp_path, monkeypatch):
     config = make_config(tmp_path)
     config.round['split_long_replies'] = True
-    config.round['split_max_chars'] = 4
+    config.round['split_max_chars'] = 7
     config.round['split_max_parts'] = 3
     task = {
         'id': 'quota-task-1',
@@ -379,12 +415,12 @@ def test_quota_reply_dry_run_validates_without_completing_or_sending(
     monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
 
     result = asyncio.run(telegram_ops.quota_reply(
-        config, 'quota-task-1', '一二三四五六七八', dry_run=True))
+        config, 'quota-task-1', '一二三四五六七八九壹贰叁肆伍', dry_run=True))
 
     assert result['dry_run'] is True
     assert result['sent'] is False
     assert result['message_ids'] == []
-    assert result['parts'] == ['一二三四', '五六七八']
+    assert result['parts'] == ['一二三四五六七', '八九壹贰叁肆伍']
     assert fake_client.sent_texts == []
     assert quota.completed == []
     assert quota.get_task(config.quota['state_path'], 'quota-task-1')['status'] == 'pending'
@@ -409,7 +445,7 @@ def test_quota_reply_dry_run_uses_task_context_profile_without_credentials(
             'profile': {'forbidden_terms': ['禁词']},
             'round': {
                 'split_long_replies': True,
-                'split_max_chars': 4,
+                'split_max_chars': 7,
                 'split_max_parts': 3,
             },
         },
@@ -432,8 +468,8 @@ def test_quota_reply_dry_run_uses_task_context_profile_without_credentials(
             config, 'quota-task-1', '这里有禁词', dry_run=True))
 
     result = asyncio.run(telegram_ops.quota_reply(
-        config, 'quota-task-1', '一二三四五六七八', dry_run=True))
-    assert result['parts'] == ['一二三四', '五六七八']
+        config, 'quota-task-1', '一二三四五六七八九壹贰叁肆伍', dry_run=True))
+    assert result['parts'] == ['一二三四五六七', '八九壹贰叁肆伍']
     assert quota.completed == []
 
 
@@ -441,7 +477,7 @@ def test_quota_reply_sends_split_parts_and_counts_actual_message_ids(
         tmp_path, monkeypatch):
     config = make_config(tmp_path)
     config.round['split_long_replies'] = True
-    config.round['split_max_chars'] = 4
+    config.round['split_max_chars'] = 7
     config.round['split_max_parts'] = 3
     task = {
         'id': 'quota-task-1',
@@ -469,13 +505,13 @@ def test_quota_reply_sends_split_parts_and_counts_actual_message_ids(
     monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
 
     result = asyncio.run(telegram_ops.quota_reply(
-        config, 'quota-task-1', '一二三四五六七八'))
+        config, 'quota-task-1', '一二三四五六七八九壹贰叁肆伍'))
 
     assert result['sent'] is True
     assert result['message_ids'] == [101, 102]
     assert fake_client.sent_texts == [
-        ('entity', '一二三四'),
-        ('entity', '五六七八'),
+        ('entity', '一二三四五六七'),
+        ('entity', '八九壹贰叁肆伍'),
     ]
     assert quota.completed == [{
         'task_id': 'quota-task-1',
@@ -485,6 +521,77 @@ def test_quota_reply_sends_split_parts_and_counts_actual_message_ids(
     target = quota.get_status(config.quota['state_path'])['targets'][0]
     assert target['sent_count'] == 2
     assert target['status'] == 'done'
+
+
+def test_quota_reply_skips_stale_snapshot_before_sending(
+        tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    task = {
+        'id': 'quota-task-1',
+        'status': 'pending',
+        'chat_id': 5217114569,
+        'context': {
+            'messages': [
+                {
+                    'id': 10,
+                    'sender': 'alice',
+                    'out': False,
+                    'text': '今晚开黑吗',
+                },
+            ],
+        },
+    }
+    quota = FakeQuotaStore({
+        'run_id': 'quota-1',
+        'status': 'active',
+        'targets': [{
+            'chat_id': 5217114569,
+            'target_count': 2,
+            'sent_count': 0,
+            'status': 'active',
+        }],
+    }, task=task)
+    fake_client = FakeTelegramClient()
+
+    async def fake_resolve_chat(client, chat):
+        return 'entity', {'id': 5217114569, 'title': 'quota chat'}
+
+    async def fake_recent_context(client, entity, limit):
+        assert client is fake_client
+        assert entity == 'entity'
+        assert limit >= 12
+        return [
+            {
+                'id': 10,
+                'sender': 'alice',
+                'out': False,
+                'text': '今晚开黑吗',
+            },
+            {
+                'id': 11,
+                'sender': 'bob',
+                'out': False,
+                'text': '我也想玩',
+            },
+        ]
+
+    monkeypatch.setattr(telegram_ops, 'quota_store', quota)
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    monkeypatch.setattr(
+        telegram_ops, '_recent_context_lines', fake_recent_context)
+
+    with pytest.raises(telegram_ops.TelegramCliError, match='stale context'):
+        asyncio.run(telegram_ops.quota_reply(
+            config, 'quota-task-1', '晚上可以开两把'))
+
+    assert fake_client.sent_texts == []
+    assert quota.completed == []
+    assert quota.skipped == [{
+        'task_id': 'quota-task-1',
+        'reason': 'stale_context',
+    }]
+    assert quota.get_task(config.quota['state_path'], 'quota-task-1')['status'] == 'skipped'
 
 
 def test_quota_reply_blocks_hourly_limit_without_sending(
@@ -526,7 +633,7 @@ def test_quota_reply_blocks_hourly_limit_without_sending(
 
     with pytest.raises(telegram_ops.TelegramCliError, match='hourly'):
         asyncio.run(telegram_ops.quota_reply(
-            config, 'quota-task-1', '再来一句'))
+            config, 'quota-task-1', '再来一句够七字'))
 
     assert fake_client.sent_texts == []
     assert quota.completed == []
@@ -577,7 +684,7 @@ def test_quota_reply_uses_preset_daemon_rate_limits(tmp_path, monkeypatch):
 
     with pytest.raises(telegram_ops.TelegramCliError, match='hourly'):
         asyncio.run(telegram_ops.quota_reply(
-            config, 'quota-task-1', '再来一句'))
+            config, 'quota-task-1', '再来一句够七字'))
 
     assert fake_client.sent_texts == []
     assert quota.completed == []
@@ -621,7 +728,7 @@ def test_quota_reply_rechecks_run_after_begin_task(tmp_path, monkeypatch):
 
     with pytest.raises(telegram_ops.TelegramCliError, match='stopped'):
         asyncio.run(telegram_ops.quota_reply(
-            config, 'quota-task-1', '再来一句'))
+            config, 'quota-task-1', '再来一句够七字'))
 
     assert fake_client.sent_texts == []
     assert quota.completed == []
@@ -778,12 +885,31 @@ def test_round_reply_parts_respects_config(tmp_path):
     assert telegram_ops._round_reply_parts(config, '一二三四五六') == ['一二三四五六']
 
     config.round['split_long_replies'] = True
-    config.round['split_max_chars'] = 3
+    config.round['split_max_chars'] = 7
     config.round['split_max_parts'] = 3
-    assert telegram_ops._round_reply_parts(config, '一二三四五六') == [
-        '一二三',
-        '四五六',
+    assert telegram_ops._round_reply_parts(config, '一二三四五六七八九十十一十二') == [
+        '一二三四五六七',
+        '八九十十一十二',
     ]
+
+
+def test_validate_agent_reply_parts_rejects_short_message(tmp_path):
+    config = make_config(tmp_path)
+
+    with pytest.raises(telegram_ops.TelegramCliError, match='at least 7'):
+        telegram_ops.validate_agent_reply_parts(config, '来了')
+
+
+def test_round_reply_parts_merge_short_split_tail(tmp_path):
+    config = make_config(tmp_path)
+    config.round['split_long_replies'] = True
+    config.round['split_max_chars'] = 8
+    config.round['split_max_parts'] = 5
+
+    assert telegram_ops.validate_agent_reply_parts(
+        config, '一二三四五六七。八九十。') == [
+            '一二三四五六七。八九十。',
+        ]
 
 
 def test_remaining_message_budget_counts_split_message_ids():
@@ -823,8 +949,81 @@ def test_initiative_instruction_explains_topic_shift_fallback():
 
     assert 'allow_topic_shift=True' in prompt
     assert 'fallback_topics=晚上有人开黑吗' in prompt
+    assert 'bot notice' in prompt
+    assert 'Light adult jokes in trusted tests may get a short non-explicit reaction' in prompt
+    assert 'real adult-service solicitation' in prompt
+    assert 'ignore that context instead of freezing' in prompt
     assert 'start one neutral fallback topic' in prompt
     assert 'Do not explain the subject change' in prompt
+
+
+def test_initiative_instruction_filters_bot_notice_context():
+    prompt = telegram_ops._initiative_instruction(
+        profile={'language': '中文', 'style': 'social', 'max_chars': 80},
+        persona={'identity': 'regular member'},
+        reply_policy={},
+        initiative={'enabled': True, 'allow_topic_shift': True},
+        recent_messages=[
+            {'id': 1, 'sender': 'House', 'text': '欣欣我的欣欣'},
+            {'id': 2, 'sender': 'TGBot', 'text': '严打胡乱灌水'},
+            {'id': 3, 'sender': '锦鲤骑士', 'text': '签到成功，积分加10'},
+            {'id': 4, 'sender': '深圳 INTJ', 'text': '每天来群看一下'},
+        ],
+    )
+
+    assert '[1] House: 欣欣我的欣欣' in prompt
+    assert '[4] 深圳 INTJ: 每天来群看一下' in prompt
+    assert '严打胡乱灌水' not in prompt
+    assert '签到成功' not in prompt
+
+
+def test_initiative_self_context_guard_blocks_trailing_own_messages():
+    initiative = {
+        'self_context_guard': True,
+        'self_context_recent': 6,
+        'self_context_max_trailing_own': 2,
+    }
+    messages = [
+        {'id': 1, 'sender': 'p1', 'text': '中午吃啥', 'out': False},
+        {'id': 2, 'sender': 'me', 'text': '火锅吧', 'out': True},
+        {'id': 3, 'sender': 'me', 'text': '或者把子肉也行', 'out': True},
+    ]
+
+    assert telegram_ops._initiative_self_context_skip_reason(
+        initiative, messages) == 'self_context_wait'
+
+
+def test_initiative_self_context_guard_allows_after_human_message():
+    initiative = {
+        'self_context_guard': True,
+        'self_context_recent': 6,
+        'self_context_max_trailing_own': 2,
+    }
+    messages = [
+        {'id': 1, 'sender': 'me', 'text': '有人开两把吗', 'out': True},
+        {'id': 2, 'sender': 'me', 'text': '我手有点痒', 'out': True},
+        {'id': 3, 'sender': 'p1', 'text': '等我十分钟', 'out': False},
+    ]
+
+    assert telegram_ops._initiative_self_context_skip_reason(
+        initiative, messages) is None
+
+
+def test_initiative_self_context_guard_ignores_bot_notice_tail():
+    initiative = {
+        'self_context_guard': True,
+        'self_context_recent': 6,
+        'self_context_max_trailing_own': 2,
+    }
+    messages = [
+        {'id': 1, 'sender': 'p1', 'text': '今天好安静', 'out': False},
+        {'id': 2, 'sender': 'me', 'text': '都去干饭了吧', 'out': True},
+        {'id': 3, 'sender': 'me', 'text': '我也快饿死了', 'out': True},
+        {'id': 4, 'sender': 'TGBot', 'text': '签到成功，积分加10', 'out': False},
+    ]
+
+    assert telegram_ops._initiative_self_context_skip_reason(
+        initiative, messages) == 'self_context_wait'
 
 
 def test_initiative_min_start_uses_round_start_instead_of_activity():
@@ -890,7 +1089,7 @@ def test_format_persona_guidance_renders_style_notes_cleanly():
     assert "['像随手回一句']" not in guidance
 
 
-def test_daemon_reply_counts_ignore_current_reply_pending_task(tmp_path):
+def test_daemon_hourly_reply_count_ignores_current_reply_pending_task(tmp_path):
     queue_path = tmp_path / 'queue.json'
     first = daemon.create_task(
         chat={'id': 5217114569, 'title': 'chat'},
@@ -923,14 +1122,13 @@ def test_daemon_reply_counts_ignore_current_reply_pending_task(tmp_path):
     daemon.append_task(queue_path, third)
     daemon.queue_reply_task(queue_path, third['id'], '来了')
 
-    assert telegram_ops._daemon_reply_counts(
+    assert telegram_ops._daemon_hourly_reply_count(
         queue_path,
         5217114569,
-        now=telegram_ops._daemon_parse_time('2026-06-01T00:01:00+00:00')) == (
-            2, 2)
+        now=telegram_ops._daemon_parse_time('2026-06-01T00:01:00+00:00')) == 2
 
 
-def test_daemon_reply_counts_hourly_ignores_pending_breaks(tmp_path):
+def test_daemon_hourly_reply_count_ignores_pending_breaks(tmp_path):
     queue_path = tmp_path / 'queue.json'
     completed = daemon.create_task(
         chat={'id': 5217114569, 'title': 'chat'},
@@ -952,11 +1150,10 @@ def test_daemon_reply_counts_hourly_ignores_pending_breaks(tmp_path):
     daemon.complete_task(queue_path, completed['id'], message_id=1)
     daemon.append_task(queue_path, pending)
 
-    assert telegram_ops._daemon_reply_counts(
+    assert telegram_ops._daemon_hourly_reply_count(
         queue_path,
         5217114569,
-        now=telegram_ops._daemon_parse_time('2026-06-01T00:01:00+00:00')) == (
-            1, 0)
+        now=telegram_ops._daemon_parse_time('2026-06-01T00:01:00+00:00')) == 1
 
 
 def test_daemon_send_reply_rechecks_stop_after_rate_limit_sleep(
@@ -971,7 +1168,8 @@ def test_daemon_send_reply_rechecks_stop_after_rate_limit_sleep(
         initiative={},
         now='2026-06-01T00:00:00+00:00')
     daemon.append_task(config.daemon['queue_path'], task)
-    queued = daemon.queue_reply_task(config.daemon['queue_path'], task['id'], '来了')
+    queued = daemon.queue_reply_task(
+        config.daemon['queue_path'], task['id'], '来了兄弟们下午好')
     sent_texts = []
 
     class FakeClient:
@@ -1025,7 +1223,7 @@ def test_daemon_send_reply_holds_task_when_hourly_limit_reached(tmp_path):
     daemon.complete_task(config.daemon['queue_path'], completed['id'], message_id=1)
     daemon.append_task(config.daemon['queue_path'], pending)
     queued = daemon.queue_reply_task(
-        config.daemon['queue_path'], pending['id'], '来了')
+        config.daemon['queue_path'], pending['id'], '来了兄弟们下午好')
     sent_texts = []
 
     class FakeClient:
@@ -1056,9 +1254,8 @@ def test_daemon_send_reply_splits_long_reply_and_counts_parts(tmp_path):
     config = make_config(tmp_path)
     config.daemon['min_reply_interval'] = 0
     config.daemon['max_messages_per_hour'] = 10
-    config.daemon['max_consecutive_replies'] = 10
     config.round['split_long_replies'] = True
-    config.round['split_max_chars'] = 4
+    config.round['split_max_chars'] = 7
     config.round['split_max_parts'] = 3
     config.round['split_delay_min'] = 0
     config.round['split_delay_max'] = 0
@@ -1072,7 +1269,7 @@ def test_daemon_send_reply_splits_long_reply_and_counts_parts(tmp_path):
         now='2026-06-01T00:00:00+00:00')
     daemon.append_task(config.daemon['queue_path'], task)
     queued = daemon.queue_reply_task(
-        config.daemon['queue_path'], task['id'], '一二三四五六七八')
+        config.daemon['queue_path'], task['id'], '一二三四五六七八九壹贰叁肆伍')
     sent_texts = []
 
     class FakeClient:
@@ -1092,26 +1289,24 @@ def test_daemon_send_reply_splits_long_reply_and_counts_parts(tmp_path):
             emit=lambda text='': None)
 
     assert asyncio.run(run()) is not None
-    assert sent_texts == ['一二三四', '五六七八']
+    assert sent_texts == ['一二三四五六七', '八九壹贰叁肆伍']
     saved = daemon.get_task(config.daemon['queue_path'], task['id'])
     assert saved['status'] == 'completed'
     assert saved['message_id'] == 101
     assert saved['message_ids'] == [101, 102]
-    assert telegram_ops._daemon_reply_counts(
+    assert telegram_ops._daemon_hourly_reply_count(
         config.daemon['queue_path'],
         5217114569,
-        now=telegram_ops._daemon_parse_time('2026-06-01T00:01:00+00:00')) == (
-            2, 2)
+        now=telegram_ops._daemon_parse_time('2026-06-01T00:01:00+00:00')) == 2
 
 
-def test_daemon_send_reply_holds_when_split_parts_exceed_consecutive_limit(
+def test_daemon_send_reply_does_not_hold_split_parts_by_consecutive_count(
         tmp_path):
     config = make_config(tmp_path)
     config.daemon['min_reply_interval'] = 0
     config.daemon['max_messages_per_hour'] = 10
-    config.daemon['max_consecutive_replies'] = 1
     config.round['split_long_replies'] = True
-    config.round['split_max_chars'] = 4
+    config.round['split_max_chars'] = 7
     config.round['split_max_parts'] = 3
     config.round['split_delay_min'] = 0
     config.round['split_delay_max'] = 0
@@ -1125,7 +1320,7 @@ def test_daemon_send_reply_holds_when_split_parts_exceed_consecutive_limit(
         now='2026-06-01T00:00:00+00:00')
     daemon.append_task(config.daemon['queue_path'], task)
     queued = daemon.queue_reply_task(
-        config.daemon['queue_path'], task['id'], '一二三四五六七八')
+        config.daemon['queue_path'], task['id'], '一二三四五六七八九壹贰叁肆伍')
     sent_texts = []
 
     class FakeClient:
@@ -1144,11 +1339,11 @@ def test_daemon_send_reply_holds_when_split_parts_exceed_consecutive_limit(
             dry_run=False,
             emit=lambda text='': None)
 
-    assert asyncio.run(run()) is None
-    assert sent_texts == []
+    assert asyncio.run(run()) is not None
+    assert sent_texts == ['一二三四五六七', '八九壹贰叁肆伍']
     saved = daemon.get_task(config.daemon['queue_path'], task['id'])
-    assert saved['status'] == 'held_rate_limit'
-    assert saved['rate_limit_reason'] == 'consecutive_limit'
+    assert saved['status'] == 'completed'
+    assert saved['message_ids'] == [77, 77]
 
 
 def test_daemon_run_releases_lock_when_client_start_fails(tmp_path, monkeypatch):
@@ -1277,6 +1472,81 @@ def test_daemon_run_does_not_queue_slow_initiative_after_duration(
     assert recent_calls['count'] >= 2
     assert not any('Queued daemon task' in item for item in outputs)
     assert daemon.queue_counts(config.daemon['queue_path']) == {}
+    assert config.daemon['lock_path'].exists() is False
+
+
+def test_daemon_run_skips_initiative_on_self_context(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    config.bad_cases = {
+        'enabled': True,
+        'path': tmp_path / 'bad-cases.jsonl',
+        'max_records': 20,
+        'max_task_bad_cases': 3,
+    }
+    config.initiative = {
+        'enabled': True,
+        'idle_after': 0,
+        'cooldown': 1,
+        'max_starts': 1,
+        'min_starts': 1,
+        'min_start_after': 0,
+        'avoid_when_active': False,
+        'active_threshold': 0,
+        'recent_window': 1,
+        'self_context_guard': True,
+        'self_context_recent': 6,
+        'self_context_max_trailing_own': 2,
+        'topics': [],
+        'allowed_intents': [],
+        'forbidden_topics': [],
+    }
+    outputs = []
+
+    class FakeClient:
+        async def start(self):
+            return None
+
+        async def get_me(self):
+            return SimpleNamespace(
+                id=999, username='agent', first_name='Agent', last_name=None)
+
+        def on(self, event):
+            def decorator(handler):
+                return handler
+            return decorator
+
+        async def disconnect(self):
+            return None
+
+    async def fake_resolve_chat(client, chat):
+        return 'entity', {'id': 5217114569, 'title': 'chat'}
+
+    async def fake_recent_context(client, entity, limit):
+        return [
+            {'id': 1, 'sender': 'p1', 'text': '中午吃啥', 'out': False},
+            {'id': 2, 'sender': 'me', 'text': '火锅吧', 'out': True},
+            {'id': 3, 'sender': 'me', 'text': '或者把子肉', 'out': True},
+        ]
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: FakeClient())
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    monkeypatch.setattr(
+        telegram_ops, '_recent_context_lines', fake_recent_context)
+
+    asyncio.run(telegram_ops.daemon_run(
+        config, '5217114569', duration=0.03,
+        output_func=lambda text='': outputs.append(text)))
+
+    assert any('Skipped initiative: self_context_wait.' in item
+               for item in outputs)
+    assert not any('Queued daemon task' in item for item in outputs)
+    assert daemon.queue_counts(config.daemon['queue_path']) == {}
+    status = telegram_ops.daemon_store.read_status(config.daemon['status_path'])
+    assert status['agent_report']['statuses']['skipped'] == 1
+    assert status['agent_report']['reasons']['self_context_wait'] == 1
+    records = bad_case_store.list_bad_cases(config, chat_id=5217114569)
+    assert records[0]['case_type'] == 'self_flood'
+    assert records[0]['messages'][0]['text_hash']
     assert config.daemon['lock_path'].exists() is False
 
 

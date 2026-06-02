@@ -20,7 +20,9 @@ def test_load_state_defaults_to_empty_state(tmp_path):
         'status': 'empty',
         'created_at': None,
         'updated_at': None,
+        'account_name': '',
         'preset': None,
+        'scenario': None,
         'targets': [],
         'tasks': [],
     }
@@ -34,7 +36,9 @@ def test_save_state_is_atomic_and_creates_parent(tmp_path):
         'status': 'active',
         'created_at': NOW,
         'updated_at': NOW,
+        'account_name': '',
         'preset': None,
+        'scenario': None,
         'targets': [],
         'tasks': [],
     }
@@ -53,6 +57,14 @@ def test_create_run_normalizes_targets_and_status(tmp_path):
         state_path,
         [{'chat_id': '111', 'target_count': '2'}, ('222', 3)],
         preset='chat_social',
+        scenario={
+            'name': 'newmei-afuan-150',
+            'account': 'lu',
+            'chat_id': 111,
+            'persona': 'afuan_social',
+            'target_messages': 150,
+            'stop_on': ['target_reached', 'manual_stop'],
+        },
         now=NOW,
     )
 
@@ -60,7 +72,16 @@ def test_create_run_normalizes_targets_and_status(tmp_path):
     assert state['status'] == 'active'
     assert state['created_at'] == NOW
     assert state['updated_at'] == NOW
+    assert state['account_name'] == ''
     assert state['preset'] == 'chat_social'
+    assert state['scenario'] == {
+        'name': 'newmei-afuan-150',
+        'account': 'lu',
+        'chat_id': 111,
+        'persona': 'afuan_social',
+        'target_messages': 150,
+        'stop_on': ['target_reached', 'manual_stop'],
+    }
     assert state['tasks'] == []
     assert state['targets'] == [
         {
@@ -82,6 +103,18 @@ def test_create_run_normalizes_targets_and_status(tmp_path):
     ]
     assert quota.status(state_path) == state
     assert quota.get_status(state_path) == state
+
+
+def test_create_run_and_task_store_account_name(tmp_path):
+    state_path = tmp_path / 'quota.json'
+
+    state = quota.create_run(
+        state_path, [{'chat_id': 111, 'target_count': 1}],
+        preset='chat_social', account_name='account-a', now=NOW)
+    task = quota.create_task(state_path, 111, now=NOW)
+
+    assert state['account_name'] == 'account-a'
+    assert task['account_name'] == 'account-a'
 
 
 @pytest.mark.parametrize('targets', [
@@ -112,6 +145,7 @@ def test_create_run_accepts_mapping_and_chat_count_strings(tmp_path):
 
     assert [target['chat_id'] for target in state['targets']] == [111, 222]
     assert replaced['run_id'] == 'quota-20260601T060100Z'
+    assert replaced['scenario'] is None
     assert replaced['targets'][0]['chat_id'] == 333
     assert replaced['targets'][0]['target_count'] == 3
     assert replaced['tasks'] == []
