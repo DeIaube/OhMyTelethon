@@ -72,6 +72,7 @@ Safety rules:
 - Keep `game round` rate-limit and end-buffer checks local and testable.
 - Keep `game round --max-replies` as the outbound Telegram message cap; split replies must not exceed the remaining cap.
 - Keep `game round` human-likeness gates local and testable: probability skip, short-ack skip, merge-window, mention probability, and random delay must not bypass safety checks.
+- Keep inbound safety skips local and testable: AI/robot accusations, anti-spam or ban warnings, adult-service solicitations, non-consensual recording, underage or age-risk language, ads, and grey-area account/black-market topics must skip prompting rather than rely only on operator judgment. Ads, traffic redirection, and adult-service solicitations are skip-only signals; they must not trigger a risk cooldown by themselves.
 - Keep initiative behavior bounded and low-risk by default. Any proactive or more social preset must still pass whitelist, pause, forbidden-term, rate-limit, audit, and report behavior.
 - Long reply splitting must keep every message part inside the same write safety checks and audit behavior, and must not be used merely to raise message count.
 - Keep daemon behavior single-chat and foreground-only for v0.4. Do not add multi-group hosting, background system services, web UI, or model API calls in this scope.

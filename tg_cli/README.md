@@ -161,6 +161,7 @@ Quota mode is not a scheduler and does not call a model provider. It is the send
 - `profile.forbidden_terms` and `profile.avoid_topics` block outbound text before `client.send_message`.
 - `persona`, `reply_policy`, and `initiative` are prompt guidance only. They do not authorize sending to non-whitelisted chats, bypass `pause`, bypass forbidden terms, skip rate limits, hide audit records, or suppress the round report.
 - `character`, `actions`, `evaluators`, and `memory` are prompt/task context only. They do not grant extra send permission or bypass any safety control.
+- Inbound agent prompts are deterministically skipped when recent text contains high-risk signals such as AI/robot accusations, anti-spam or ban warnings, adult-service solicitations, non-consensual recording, underage/age-risk language, ads, or grey-area account/black-market topics. Ads, traffic redirection, and adult-service solicitations are skip-only signals; they must not enter a risk cooldown by themselves.
 - `game round` rate-limits sends and stops prompting near the end of a bounded round.
 - `game round` can skip low-information messages, skip by probability, merge rapid messages, and delay sends without becoming a daemon or auto mode.
 - `daemon run` uses a single-instance lock so two daemons do not write the same queue/session at the same time.

@@ -148,6 +148,7 @@ For a credential-free starter file, see `tg_cli/docs/local-profile-template.json
 - `initiative.topic_shift_when`: Situation labels where topic shifting is preferred over engaging the latest context.
 - `initiative.topic_shift_style`: Natural-language guidance for how to change topics.
 - `initiative.fallback_topics`: Safe topic seeds used when shifting away from ads, spam, grey-area, or unclear context.
+- Inbound ads, traffic redirection, and adult-service solicitations are skip-only signals. They should make the agent ignore that message, not enter a risk cooldown.
 - `initiative.allowed_intents`: Allowed proactive intent labels.
 - `initiative.forbidden_topics`: Topic labels the operator should avoid.
 - `daemon.queue_path`: Local JSON queue file for pending daemon tasks. This should stay ignored by git.
@@ -391,5 +392,7 @@ tg-cli game round 5217114569 --duration 120 --max-replies 10 \
 - `--skip-short-ack`: Skip low-information messages such as `嗯`, `哈哈`, `真的假的`, and one-character acknowledgements.
 - `--merge-window`: Collect rapid consecutive inbound messages before prompting once.
 - `--split-long-replies`: Split long typed replies using `round.split_*`.
+
+In addition to prompt guidance, `tg-cli` applies deterministic inbound skips before asking the operator for a reply. Messages containing AI/robot accusations, anti-spam or ban warnings, adult-service solicitations, non-consensual recording, underage or age-risk language, ads, or grey-area account/black-market topics are skipped locally.
 
 When `round.split_long_replies` is enabled, splitting prefers punctuation boundaries, falls back to character length, and caps parts with `round.split_max_parts`. Splitting is for naturally separate thoughts, not for raising message count. Each part still goes through forbidden-term checks and audit logging; `game round` also applies end-buffer checks.
