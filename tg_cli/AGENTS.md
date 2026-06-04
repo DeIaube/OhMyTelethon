@@ -22,6 +22,8 @@ Default local CLI config, state, and audit files also live under `tg_cli/` and a
 
 Current capabilities:
 
+- `tg-cli capabilities [--json]`: show the machine-readable command catalog for agents, including argparse-derived command paths, arguments, examples, risk levels, credential requirements, dry-run support, and safety notes.
+- `tg-cli doctor agent [--json]`: run a credential-free local preflight for external agents; report runtime paths, pause state, allowed chats, session presence, daemon/quota state, readiness flags, findings, and docs pointers without opening Telegram.
 - `tg-cli me`: show the logged-in Telegram account.
 - `tg-cli auth status/login/qr-login/logout/edit-2fa`: inspect or manage the local Telethon authorization/session flow without printing secrets; login and 2FA commands must not audit or echo codes, passwords, API hash, phone numbers, bot tokens, or session bytes.
 - `tg-cli groups`: list groups and channels.
@@ -88,6 +90,7 @@ Profile config:
 - For two-agent/two-account operation, use one config file per account and keep every runtime path unique: `session_path`, `state_path`, `audit_log_path`, `daemon.queue_path`, `daemon.lock_path`, `daemon.status_path`, `quota.state_path`, `memory.path`, and `bad_cases.path`.
 - Run `tg-cli --config <account-a.json> config doctor --other-config <account-b.json>` before starting concurrent agents.
 - Explicit config-relative paths resolve relative to the config file directory. Default paths without an explicit config still resolve under the repository-local `tg_cli/` runtime files.
+- Agents should start with `tg-cli capabilities --json` and `tg-cli doctor agent --json` before using unfamiliar CLI flows. When new top-level commands, safety contracts, or operator workflows are added, update `tg_cli/agent_discovery.py` command metadata in the same change.
 - `character` is an elizaOS-inspired prompt contract with `name`, `bio`, `lore`, `style`, `topics`, `adjectives`, `message_examples`, `actions`, and `evaluators`. It is guidance only.
 - Top-level `presets` can contain named `profile`, `persona`, `reply_policy`, `initiative`, `round`, and non-path `daemon` overlays. `game suggest`, `game round`, and `daemon run` select them with `--preset NAME`; command flags still override preset round values. Social Policy examples should keep normal/social initiative as explicit presets such as `chat_normal` and `chat_social`, with default initiative off or low-frequency. For short social tests, `chat_social` may set `initiative.min_starts` with `initiative.min_start_after` so the operator receives bounded, content-aware proactive opportunities even in an active chat. When `initiative.allow_topic_shift` is true, social presets may start a safe fallback topic instead of engaging ads, spam, actual account/black-market topics, or unjoinable recent context.
 - Outgoing social behavior should mix direct replies with short context-adjacent topic starts. Do not make `chat_social` mean only "reply more often"; tune `initiative.active_threshold`, `initiative.min_starts`, `initiative.self_context_guard`, fallback topics, and daemon caps together so the account can start safe topics without self-spamming.
@@ -143,10 +146,11 @@ Safety rules:
 - Memory event records must not store raw message text. Store operator-authored summaries, preferences, recurring topics, or explicit stable facts only.
 - Bad case records must not store raw message text, chat titles, API hash, phone number, or session data. Use `tg_cli.bad_cases.record_bad_case` so future automated captures get consistent hashing, lesson text, and prompt guidance.
 - `character`, `actions`, `evaluators`, and `memory` must not bypass whitelist, pause, forbidden-term checks, rate limits, audit, or status/report behavior.
+- Commands that expose `--json` must return known CLI/config/safety/session failures as a standard JSON error object on stderr: `{"ok": false, "error": {"code": "...", "message": "...", "type": "...", "hint": "..."}}`. `hint` is optional. Do not make agents parse human-readable error text when JSON was explicitly requested.
 - Avoid concurrent `tg-cli` commands on the same Telethon session file during live rounds; the session is SQLite-backed and single-writer behavior can lock concurrent commands.
 - Avoid concurrent `tg-cli` commands on the same Telethon session file while `daemon run` is active, except queue commands that do not open Telegram.
 - Avoid concurrent quota reply flows on the same Telethon session file. `quota status` and `quota stop` are local-state operations, but Telegram-reading or Telegram-writing quota commands should be serialized with other live CLI flows.
-- If CLI behavior, commands, safety rules, config, or file layout changes, update this file and the relevant `tg_cli/` documentation in the same change.
+- If CLI behavior, commands, safety rules, config, prompt/task payloads, runtime file layout, or ignored local state changes, update this file, `tg_cli/README.md`, `tg_cli/agent_discovery.py`, and the relevant `tg_cli/docs/` documentation in the same change. If an external-agent workflow changes, update `tg_cli/docs/agent-recipes.md` too.
 
 Local test command:
 

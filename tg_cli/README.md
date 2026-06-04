@@ -28,6 +28,8 @@ Round behavior can also live in `tg_cli/.tg-cli.json`, so day-to-day runs can be
 ## Commands
 
 ```sh
+tg-cli capabilities --json
+tg-cli doctor agent --json
 tg-cli me
 tg-cli auth status --json
 tg-cli auth login --phone "+1234567890"
@@ -130,6 +132,8 @@ tg-cli badcase list --chat 5217114569 --json
 tg-cli badcase export
 ```
 
+`capabilities --json` is the machine-readable command catalog for agents. It is generated from the argparse command tree and includes command paths, arguments, examples, JSON support, dry-run support, risk level, credential requirements, and safety notes. `doctor agent --json` is a credential-free local preflight that reports readiness, runtime paths, pause state, allowed chats, session presence, daemon/quota state, and documentation pointers without opening Telegram.
+
 `auth`, `groups`, `dialogs`, `dialog`, `entity`, `members`, `profile`, `history`, `send`, `messages`, `drafts`, `downloads`, `admin`, and `bot` expose the general Telethon-backed CLI surface through safe wrappers. The legacy `history <chat>` and `send <chat> <text>` commands remain compatible; `messages history` and `messages send` are the expanded forms. History output includes bounded text rows and safe media metadata only, never downloaded bytes or raw TL objects. `messages get/replies/scheduled/search` cover explicit ID fetches, reply/comment threads, scheduled messages, global search, and common Telethon message filters. `members search/list` searches or lists one group's members with optional participant filters. `profile show/photos` emits sanitized public profile fields or profile-photo metadata only: no phone numbers, access hashes, raw TL dictionaries, session data, downloaded avatars, or profile-photo bytes.
 
 All `messages`, `drafts`, `dialog`, `admin`, and `bot inline-send` write commands keep the same local safety contract: target chats must be whitelisted, `pause` blocks live writes, outbound text/captions are checked against `profile.forbidden_terms` and `profile.avoid_topics`, live writes require confirmation unless `--yes` is supplied, and `--dry-run` validates/audits without mutating Telegram. Message management commands only accept explicit message ids; they do not expose range deletion or unpin-all behavior. The CLI does not expose arbitrary raw TL request passthrough.
@@ -154,7 +158,7 @@ Suggested first Social Policy test:
 tg-cli game round 5217114569 --duration 300 --preset chat_social
 ```
 
-See `tg_cli/docs/agent-operator.md` for the Codex/Claude operation flow.
+See `tg_cli/docs/agent-recipes.md` for a concise command cookbook and `tg_cli/docs/agent-operator.md` for the Codex/Claude operation flow.
 See `tg_cli/docs/scenario-runs.md` for authorized long-running scenario handoffs such as one account, one informed test group, one persona/preset, and a `150` message quota target.
 
 Round operator flags:
@@ -258,3 +262,5 @@ Quota mode is not a scheduler and does not call a model provider. It is the send
 - Audit logs store message hashes and lengths, not raw message text.
 - Bad case records also store hashes/lengths and lessons, not raw message text. To add a new automated bad case, add a reason rule in `tg_cli.bad_cases.BAD_CASE_REASON_RULES` and call `record_bad_case` at the rule trigger.
 - Use one live Telegram-writing `tg-cli` flow per Telethon session file. If another command runs while `game round`, `daemon run`, or a quota reply flow owns the same session, the CLI reports a readable session-lock error instead of a raw SQLite traceback.
+- For commands invoked with `--json`, known CLI/config/safety/session failures return a standard JSON error object on stderr: `{"ok": false, "error": {"code": "...", "message": "...", "type": "...", "hint": "..."}}`. The `hint` field is optional.
+- When CLI behavior, commands, safety rules, config, prompt/task payloads, runtime file layout, or ignored local state changes, update `tg_cli/AGENTS.md`, this README, `tg_cli/agent_discovery.py`, and the relevant `tg_cli/docs/` page in the same change.

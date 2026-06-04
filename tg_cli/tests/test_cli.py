@@ -92,6 +92,54 @@ def test_main_reports_session_database_lock(monkeypatch, tmp_path, capsys):
     assert 'same session' in captured.err
 
 
+def test_main_reports_json_error_for_json_command(
+        monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('TG_API_ID', '1')
+    monkeypatch.setenv('TG_API_HASH', 'hash')
+
+    async def fake_get_me(config):
+        raise cli.TelegramCliError('synthetic failure')
+
+    monkeypatch.setattr(cli, 'get_me', fake_get_me)
+
+    code = cli.main(['me', '--json'])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    data = json.loads(captured.err)
+    assert data == {
+        'ok': False,
+        'error': {
+            'code': 'telegram_cli_error',
+            'message': 'synthetic failure',
+            'type': 'TelegramCliError',
+        },
+    }
+
+
+def test_main_reports_session_database_lock_json(
+        monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('TG_API_ID', '1')
+    monkeypatch.setenv('TG_API_HASH', 'hash')
+
+    async def fake_get_me(config):
+        raise sqlite3.OperationalError('database is locked')
+
+    monkeypatch.setattr(cli, 'get_me', fake_get_me)
+
+    code = cli.main(['me', '--json'])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    data = json.loads(captured.err)
+    assert data['ok'] is False
+    assert data['error']['code'] == 'session_database_locked'
+    assert 'same session' in data['error']['message']
+    assert data['error']['hint'].startswith('Serialize live tg-cli commands')
+
+
 def test_config_parser_accepts_inspect_and_doctor():
     parser = cli.build_parser()
 
@@ -110,6 +158,86 @@ def test_config_parser_accepts_inspect_and_doctor():
     assert doctor_args.config_command == 'doctor'
     assert doctor_args.other_config == ['account-b.json']
     assert doctor_args.json is True
+
+
+def test_agent_discovery_parser_accepts_capabilities_and_doctor():
+    parser = cli.build_parser()
+
+    capabilities_args = parser.parse_args(['capabilities', '--json'])
+    doctor_args = parser.parse_args(['doctor', 'agent', '--json'])
+
+    assert capabilities_args.command == 'capabilities'
+    assert capabilities_args.json is True
+    assert doctor_args.command == 'doctor'
+    assert doctor_args.doctor_command == 'agent'
+    assert doctor_args.json is True
+
+
+def test_capabilities_json_outputs_command_catalog(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    code = cli.main(['capabilities', '--json'])
+
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data['schema_version'] == 1
+    assert data['generated_from'] == 'argparse'
+    commands = {item['command']: item for item in data['commands']}
+    assert 'tg-cli capabilities' in commands
+    assert commands['tg-cli capabilities']['risk'] == 'local'
+    assert 'tg-cli doctor agent' in commands
+    assert commands['tg-cli doctor agent']['credential_mode'] == 'not_required'
+    assert 'tg-cli messages send' in commands
+    assert commands['tg-cli messages send']['supports_dry_run'] is True
+    assert commands['tg-cli messages send']['risk'] == 'write'
+    assert data['agent_entrypoints']['preflight'] == 'tg-cli doctor agent --json'
+    assert data['json_error_schema']['ok'] is False
+
+
+def test_capabilities_json_ignores_invalid_local_config(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / 'broken.json'
+    config_path.write_text('[]', encoding='utf-8')
+
+    code = cli.main([
+        '--config', str(config_path), 'capabilities', '--json'])
+
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data['schema_version'] == 1
+    assert any(
+        item['command'] == 'tg-cli capabilities'
+        for item in data['commands'])
+
+
+def test_agent_doctor_json_does_not_require_credentials(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / 'agent.json'
+    config_path.write_text(json.dumps({
+        'account_name': 'agent-a',
+        'session_path': 'agent-a.session',
+        'allowed_chats': [5217114569],
+    }), encoding='utf-8')
+
+    code = cli.main([
+        '--config', str(config_path), 'doctor', 'agent', '--json'])
+
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data['schema_version'] == 1
+    assert data['account_name'] == 'agent-a'
+    assert data['allowed_chats'] == [5217114569]
+    assert data['readiness']['local_inspection'] is True
+    assert data['readiness']['telegram_io'] is False
+    assert data['runtime_paths']['session_path'].endswith('agent-a.session')
+    assert any(
+        finding['code'] == 'missing_credentials'
+        for finding in data['findings'])
+    assert any(
+        item['path'].endswith('tg_cli/docs/agent-recipes.md')
+        for item in data['docs'])
 
 
 def test_config_inspect_json_outputs_account_and_paths(

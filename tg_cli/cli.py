@@ -19,6 +19,10 @@ from .config import (
 from . import daemon as daemon_store
 from . import bad_cases as bad_case_store
 from . import scenarios as scenario_store
+from .agent_discovery import (
+    build_agent_doctor_payload, build_capabilities_payload,
+    format_agent_doctor_text, format_capabilities_text,
+)
 from .agent_memory import MemoryStore
 from .agent_report import summarize_agent_run
 from .agent_rooms import select_next_room
@@ -601,6 +605,17 @@ def build_parser():
         '--other-config', action='append', default=[], required=True,
         help='Another account config to compare. Repeat for more accounts.')
     config_doctor.add_argument('--json', action='store_true')
+
+    capabilities = sub.add_parser(
+        'capabilities', help='Show machine-readable tg-cli command metadata.')
+    capabilities.add_argument('--json', action='store_true')
+
+    doctor = sub.add_parser(
+        'doctor', help='Run local preflight checks for external agents.')
+    doctor_sub = doctor.add_subparsers(dest='doctor_command', required=True)
+    doctor_agent = doctor_sub.add_parser(
+        'agent', help='Inspect local agent readiness without Telegram IO.')
+    doctor_agent.add_argument('--json', action='store_true')
 
     auth = sub.add_parser('auth', help='Account login/session commands.')
     auth_sub = auth.add_subparsers(dest='auth_command', required=True)
@@ -2680,6 +2695,26 @@ def _print_config_doctor(payload):
             finding.get('message')))
 
 
+def _cmd_capabilities(args):
+    payload = build_capabilities_payload(build_parser())
+    if args.json:
+        _print_json(payload)
+    else:
+        print(format_capabilities_text(payload))
+    return 0
+
+
+def _cmd_doctor(args, config):
+    if args.doctor_command == 'agent':
+        payload = build_agent_doctor_payload(config)
+        if args.json:
+            _print_json(payload)
+        else:
+            print(format_agent_doctor_text(payload))
+        return 0 if payload.get('ok') else 1
+    raise AssertionError(args.doctor_command)
+
+
 def _cmd_config(args, config):
     if args.config_command == 'inspect':
         payload = account_isolation.inspect_config(config)
@@ -2702,6 +2737,44 @@ def _cmd_config(args, config):
     raise AssertionError(args.config_command)
 
 
+def _json_requested(args):
+    return bool(getattr(args, 'json', False))
+
+
+def _error_code(exc):
+    if isinstance(exc, ConfigError):
+        return 'config_error'
+    if isinstance(exc, SafetyError):
+        return 'safety_error'
+    if isinstance(exc, TelegramCliError):
+        return 'telegram_cli_error'
+    if isinstance(exc, scenario_store.ScenarioConfigError):
+        return 'scenario_config_error'
+    if isinstance(exc, daemon_store.DaemonLockError):
+        return 'daemon_lock_error'
+    return 'error'
+
+
+def _print_error(args, exc, code=None, message=None, hint=None):
+    message = str(message if message is not None else exc)
+    if _json_requested(args):
+        payload = {
+            'ok': False,
+            'error': {
+                'code': code or _error_code(exc),
+                'message': message,
+                'type': type(exc).__name__,
+            },
+        }
+        if hint:
+            payload['error']['hint'] = hint
+        print(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            file=sys.stderr)
+    else:
+        print('error: {}'.format(message), file=sys.stderr)
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -2722,7 +2795,11 @@ def main(argv=None):
             and args.quota_command == 'step'))
 
     try:
+        if args.command == 'capabilities':
+            return _cmd_capabilities(args)
         config = load_config(args.config, require_credentials=require_credentials)
+        if args.command == 'doctor':
+            return _cmd_doctor(args, config)
         if args.command == 'config':
             return _cmd_config(args, config)
         if args.command == 'pause':
@@ -2792,16 +2869,25 @@ def main(argv=None):
             ConfigError, SafetyError, TelegramCliError,
             scenario_store.ScenarioConfigError,
             daemon_store.DaemonLockError) as exc:
-        print('error: {}'.format(exc), file=sys.stderr)
+        _print_error(args, exc)
         return 2
     except sqlite3.OperationalError as exc:
         if 'database is locked' in str(exc).lower():
-            print(
-                'error: Telegram session database is locked. Another tg-cli process may be using the same session. '
-                'Wait for it to finish, or use TG_CLI_SESSION with a separate session file.',
-                file=sys.stderr)
+            _print_error(
+                args,
+                exc,
+                code='session_database_locked',
+                message=(
+                    'Telegram session database is locked. Another tg-cli process '
+                    'may be using the same session. Wait for it to finish, or use '
+                    'TG_CLI_SESSION with a separate session file.'),
+                hint='Serialize live tg-cli commands or use a separate TG_CLI_SESSION.')
         else:
-            print('error: sqlite operation failed: {}'.format(exc), file=sys.stderr)
+            _print_error(
+                args,
+                exc,
+                code='sqlite_error',
+                message='sqlite operation failed: {}'.format(exc))
         return 2
 
 
