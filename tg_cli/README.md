@@ -29,11 +29,62 @@ Round behavior can also live in `tg_cli/.tg-cli.json`, so day-to-day runs can be
 
 ```sh
 tg-cli me
+tg-cli auth status --json
+tg-cli auth login --phone "+1234567890"
+tg-cli auth qr-login
+tg-cli auth logout --dry-run --yes --json
 tg-cli groups
+tg-cli groups --query 游戏 --kind supergroup --json
+tg-cli dialogs --limit 50 --archived --json
+tg-cli dialog archive 5217114569 --dry-run --json
+tg-cli dialog unarchive 5217114569 --dry-run --json
+tg-cli dialog delete 5217114569 --dry-run --json
+tg-cli entity resolve @some_group --json
+tg-cli members search "长沙修车大堆群" "薇薇" --json
+tg-cli members list 5217114569 --filter admins --limit 50 --json
+tg-cli profile show "薇薇" --chat "长沙修车大堆群" --json
+tg-cli profile photos "薇薇" --limit 5 --json
 tg-cli history 5217114569 --limit 20
+tg-cli history 5217114569 --limit 50 --search 开黑 --from-user @alice --json
+tg-cli history 5217114569 --filter photos --json
 tg-cli send 5217114569 "tg-cli 测试消息"
 tg-cli send 5217114569 "tg-cli 测试消息" --yes
 tg-cli send 5217114569 "tg-cli 测试消息" --dry-run --yes
+tg-cli messages get 5217114569 123 124 --json
+tg-cli messages history 5217114569 --limit 50 --media-only --json
+tg-cli messages replies 5217114569 123 --limit 20 --json
+tg-cli messages scheduled 5217114569 --json
+tg-cli messages search 开黑 --global --filter photos --json
+tg-cli messages send 5217114569 "回复一下" --reply-to 123 --parse-mode none --dry-run --json
+tg-cli messages send 5217114569 "点一下" --buttons-json '[{"type":"inline","text":"OK","data":"ok"}]' --dry-run --json
+tg-cli messages send-file 5217114569 ./photo.jpg --caption "看图" --dry-run --json
+tg-cli messages send-file 5217114569 ./voice.ogg --voice-note --dry-run --json
+tg-cli messages edit 5217114569 123 "改一下文案" --dry-run --json
+tg-cli messages edit-media 5217114569 123 --file ./new.jpg --text "换图" --dry-run --json
+tg-cli messages delete 5217114569 123 124 --dry-run --json
+tg-cli messages forward 111111111 5217114569 123 --dry-run --json
+tg-cli messages copy 111111111 5217114569 123 --dry-run --json
+tg-cli messages read 5217114569 123 --dry-run --json
+tg-cli messages pin 5217114569 123 --dry-run --json
+tg-cli messages unpin 5217114569 123 --dry-run --json
+tg-cli messages action 5217114569 typing --duration 2 --dry-run --json
+tg-cli drafts list --json
+tg-cli drafts set 5217114569 "稍后发" --dry-run --json
+tg-cli drafts send 5217114569 --dry-run --json
+tg-cli drafts delete 5217114569 --dry-run --json
+tg-cli downloads media 5217114569 123 --output-dir tg_cli/downloads --json
+tg-cli downloads profile-photo "薇薇" --output-dir tg_cli/downloads --json
+tg-cli admin log 5217114569 --join --limit 20 --json
+tg-cli admin permissions show 5217114569 --user "薇薇" --json
+tg-cli admin permissions set 5217114569 --user "薇薇" --disable send_messages --dry-run --json
+tg-cli admin stats 5217114569 --json
+tg-cli admin kick 5217114569 "薇薇" --dry-run --json
+tg-cli admin ban 5217114569 "薇薇" --dry-run --json
+tg-cli admin unban 5217114569 "薇薇" --dry-run --json
+tg-cli admin promote 5217114569 "薇薇" --enable delete_messages --dry-run --json
+tg-cli admin demote 5217114569 "薇薇" --dry-run --json
+tg-cli bot inline-query @like "Do you like Telethon?" --chat 5217114569 --json
+tg-cli bot inline-send @like "Do you like Telethon?" 5217114569 --index 0 --dry-run --json
 tg-cli pause
 tg-cli resume
 tg-cli status
@@ -78,6 +129,12 @@ tg-cli memory list 5217114569 --json
 tg-cli badcase list --chat 5217114569 --json
 tg-cli badcase export
 ```
+
+`auth`, `groups`, `dialogs`, `dialog`, `entity`, `members`, `profile`, `history`, `send`, `messages`, `drafts`, `downloads`, `admin`, and `bot` expose the general Telethon-backed CLI surface through safe wrappers. The legacy `history <chat>` and `send <chat> <text>` commands remain compatible; `messages history` and `messages send` are the expanded forms. History output includes bounded text rows and safe media metadata only, never downloaded bytes or raw TL objects. `messages get/replies/scheduled/search` cover explicit ID fetches, reply/comment threads, scheduled messages, global search, and common Telethon message filters. `members search/list` searches or lists one group's members with optional participant filters. `profile show/photos` emits sanitized public profile fields or profile-photo metadata only: no phone numbers, access hashes, raw TL dictionaries, session data, downloaded avatars, or profile-photo bytes.
+
+All `messages`, `drafts`, `dialog`, `admin`, and `bot inline-send` write commands keep the same local safety contract: target chats must be whitelisted, `pause` blocks live writes, outbound text/captions are checked against `profile.forbidden_terms` and `profile.avoid_topics`, live writes require confirmation unless `--yes` is supplied, and `--dry-run` validates/audits without mutating Telegram. Message management commands only accept explicit message ids; they do not expose range deletion or unpin-all behavior. The CLI does not expose arbitrary raw TL request passthrough.
+
+`downloads` writes media/profile-photo bytes to local files and returns only paths plus shallow metadata. JSON output never includes downloaded bytes or base64 file contents.
 
 `game context` does not call an LLM. It reads a larger recent-history window and prints an agent-ready warmup summary: active speakers, local keyword/topic signals, notice/bot messages, recent questions, a compact summary, guidance, and a small message tail. Use it before daemon or longer live tests so the external agent knows what the group has recently been discussing without copying hundreds of raw messages into each task.
 
@@ -149,12 +206,18 @@ tg-cli quota next --json
 tg-cli quota reply <task_id> "这把先看看队友怎么说" --dry-run --json
 tg-cli quota reply <task_id> "这把先看看队友怎么说" --json
 tg-cli quota skip <task_id> --reason "unsafe_or_stale_context" --json
+tg-cli quota step --json
+tg-cli quota step --reply "西瓜现在甜不甜呀" --json
+tg-cli quota step --reply "西瓜现在甜不甜呀" --send --json
+tg-cli quota watch --interval 5 --count 12
 tg-cli quota stop
 ```
 
-Recommended scenario loop: `scenario start NAME --json`, `quota status --json`, `quota next --json`, first suitable `quota reply ... --dry-run --json`, live `quota reply ... --json` only when the dry-run passes and the context is still natural, `quota skip ... --reason ... --json` when it is not suitable, then target reached stop/report. Example `stop_on` labels are `target_reached`, `manual_stop`, `moderation_warning`, `spam_complaint`, `too_many_stale_context`, `hourly_limit`, and `unsafe_context_ratio`.
+Recommended scenario loop: `scenario start NAME --json`, `quota status --json`, `quota next --json` or `quota step --json`, first suitable `quota reply ... --dry-run --json` or `quota step --reply ... --json`, live `quota reply ... --json` or `quota step --reply ... --send --json` only when the dry-run passes and the context is still natural, `quota skip ... --reason ... --json` or `quota step --skip-reason ... --json` when it is not suitable, then target reached stop/report. Example `stop_on` labels are `target_reached`, `manual_stop`, `moderation_warning`, `spam_complaint`, `too_many_stale_context`, `hourly_limit`, and `unsafe_context_ratio`.
 
 `quota next --json` selects the next active target chat, creates or claims one task, and returns bounded context plus resolved `profile`, `persona`, `reply_policy`, `initiative`, `character`, `memory`, `round`, and `preset` guidance. `quota reply` sends one operator-written reply for that task. Use `--dry-run` for new groups or changed presets: it validates whitelist, pause, forbidden terms, split/remaining-count behavior, and audit behavior without sending, consuming the task, or incrementing counts. Use `quota skip` when the task context is unsafe, stale, too unclear, or not worth replying to.
+
+`quota step` is a safe operator wrapper over the same primitives. Without `--reply`, it shows progress and creates or shows the next task. With `--reply`, it defaults to dry-run and never increments quota counts. With `--reply ... --send`, it dry-runs the operator-provided text first and then performs one explicit live send through the same stale-context preflight, whitelist, pause, forbidden-term, pacing, and audit checks. It never calls a model and never generates text. `quota watch` only reads local quota state repeatedly; it does not open Telegram, create tasks, send replies, or skip tasks.
 
 Counting rules are deliberately strict:
 

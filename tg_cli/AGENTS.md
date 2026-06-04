@@ -18,14 +18,31 @@ Default local CLI config, state, and audit files also live under `tg_cli/` and a
 - `tg_cli/.tg-cli-quota-state.json.lock`
 - `tg_cli/.tg-cli-bad-cases.jsonl`
 - `tg_cli/tg-cli.audit.log`
+- `tg_cli/downloads/`
 
 Current capabilities:
 
 - `tg-cli me`: show the logged-in Telegram account.
+- `tg-cli auth status/login/qr-login/logout/edit-2fa`: inspect or manage the local Telethon authorization/session flow without printing secrets; login and 2FA commands must not audit or echo codes, passwords, API hash, phone numbers, bot tokens, or session bytes.
 - `tg-cli groups`: list groups and channels.
 - `tg-cli dialogs`: list all dialogs.
+- `tg-cli dialog archive/unarchive/delete`: archive, unarchive, or delete/leave one explicit dialog through write safety gates.
+- `tg-cli entity resolve <peer> [--json]`: resolve a chat, channel, bot, or user into a sanitized entity row without exposing access hashes or phone numbers.
+- `tg-cli members search <chat> <query> [--json]`: search one group's members by display name or username and emit sanitized user rows.
+- `tg-cli members list <chat> [--filter admins|bots|recent|banned|restricted|kicked|contacts|search] [--json]`: list bounded sanitized participant rows with optional Telethon participant filters.
+- `tg-cli profile show <user-query> [--chat <chat>] [--json]`: show sanitized public profile fields for one user or bot; with `--chat`, search that group first and reject ambiguous matches.
+- `tg-cli profile photos <peer> [--json]`: list sanitized profile-photo metadata only, never image bytes.
 - `tg-cli history <chat> --limit N`: read recent messages.
 - `tg-cli send <chat> <text>`: send one message through whitelist, pause, confirmation, and audit checks.
+- `tg-cli messages history <chat>`: expanded history command with search, sender, id/date offset, reverse, media-only, and JSON options.
+- `tg-cli messages get/replies/scheduled/search`: fetch explicit message ids, reply/comment threads, scheduled messages, or global/filter-aware search results with sanitized rows.
+- `tg-cli messages send <chat> <text>`: expanded text send command with reply, parse-mode, link-preview, silent, schedule, dry-run, confirmation, and audit support.
+- `tg-cli messages send-file <chat> <path-or-url> [...]`: send one or more media/file items with optional caption through the same whitelist, pause, confirmation, forbidden-term, dry-run, and audit gates.
+- `tg-cli messages edit/delete/forward/copy/read/pin/unpin/edit-media/action`: manage explicit message ids or bounded chat actions through conservative wrappers; live operations require write safety checks and confirmation unless `--yes` is supplied.
+- `tg-cli drafts list/set/send/delete`: inspect or mutate Telegram drafts with the same write safety gates before mutating or sending.
+- `tg-cli downloads media/profile-photo`: download explicit media/profile-photo bytes to local files; JSON returns paths and metadata only, never bytes or base64.
+- `tg-cli admin log/permissions/stats/kick/ban/unban/promote/demote`: read sanitized admin data or perform explicit moderation/admin changes through write safety gates.
+- `tg-cli bot inline-query/inline-send`: inspect inline bot results or send one selected result through write safety gates.
 - `tg-cli pause` / `tg-cli resume` / `tg-cli status`: manage write safety state.
 - `tg-cli game observe <chat>`: observe live messages.
 - `tg-cli game context <chat> --limit 200 --preset public_group_safe --operator codex --json`: read a larger recent-history window and emit a compact agent warmup summary without sending.
@@ -50,6 +67,8 @@ Current capabilities:
 - `tg-cli quota next [--json]`: claim the next quota task for an external operator, including bounded context and resolved profile guidance.
 - `tg-cli quota reply <task_id> "..." [--dry-run] [--json]`: send or dry-run one quota task reply through the safety layer and count only successful Telegram message parts.
 - `tg-cli quota skip <task_id> [--reason TEXT] [--json]`: complete one pending quota task without sending or incrementing counts.
+- `tg-cli quota step [--reply TEXT] [--send] [--skip-reason TEXT] [--json]`: safe operator wrapper that creates/shows the next quota task, dry-runs operator-provided text by default, and sends only when `--send` is explicitly supplied.
+- `tg-cli quota watch [--interval SECONDS] [--count N] [--json]`: read local quota progress repeatedly without opening Telegram or creating tasks.
 - `tg-cli quota stop`: mark the active quota run stopped so no new quota tasks or replies are accepted; in-flight sends that already passed the final safety gate may still be counted if Telegram accepted them.
 - `tg-cli scenario list/show/start [--json]`: inspect local credential-free long-run scenario definitions or start a quota run from one named scenario.
 - `tg-cli memory remember <chat> --scope room|user --text "..."`: store one concise local memory note for future Codex task context.
@@ -81,7 +100,13 @@ Safety rules:
 
 - Never bypass `tg_cli.safety.require_can_write` for write operations.
 - Never bypass outbound forbidden-term checks before `client.send_message`.
+- Never bypass outbound forbidden-term checks before text edits or media/file captions.
 - Never send to chats outside `allowed_chats`.
+- General `messages` write commands must keep `--dry-run`, confirmation or `--yes`, and audit behavior. Do not add broad range deletion, unpin-all, raw TL requests, or hidden media-byte serialization to these commands.
+- Do not expose arbitrary raw TL request passthrough in `tg-cli`. New commands should wrap Telethon high-level public methods behind explicit arguments and safety gates.
+- Entity and message JSON rows must stay sanitized: do not include phone numbers, access hashes, session data, raw TL dictionaries, downloaded media bytes, or base64 file contents.
+- Download commands may write media bytes to local files, but command output must return only file paths and shallow metadata.
+- `members` and `profile` output must stay public/sanitized: display name, username, ids, bot/verified/fake/scam flags, profile-photo presence, and public about text are acceptable; phone numbers, access hashes, raw TL objects, session data, downloaded avatars, and online status are not.
 - Keep `pause` as a global write stop.
 - Keep `game round` rate-limit and end-buffer checks local and testable.
 - Keep `game round --max-replies` as the outbound Telegram message cap; split replies must not exceed the remaining cap.
@@ -108,7 +133,9 @@ Safety rules:
 - Count quota progress only after successful Telegram sends. If one natural reply is split into multiple Telegram messages, count the actual sent parts. `--dry-run` must validate and audit without consuming tasks or incrementing counts.
 - Before a real `quota reply` send, re-read the latest chat tail and skip with `stale_context` when a newer inbound message appeared after the task snapshot.
 - Use `quota skip` for unsuitable quota tasks instead of sending filler replies just to advance a quota target.
-- For long-running scenario handoff, the expected operator loop is: `scenario start NAME --json`, `quota status --json`, `quota next --json`, `quota reply ... --dry-run --json` for the first suitable task, real `quota reply ... --json` only after dry-run passes, `quota skip ... --reason ... --json` for unsuitable tasks, then stop and report when the target is reached.
+- For long-running scenario handoff, the expected operator loop is: `scenario start NAME --json`, `quota status --json`, `quota next --json` or `quota step --json`, `quota reply ... --dry-run --json` or `quota step --reply ... --json` for the first suitable task, real `quota reply ... --json` or `quota step --reply ... --send --json` only after dry-run passes, `quota skip ... --reason ... --json` or `quota step --skip-reason ... --json` for unsuitable tasks, then stop and report when the target is reached.
+- `quota step` must not auto-generate reply text. It is an operator convenience wrapper only; without `--reply` it only shows the next task, and with `--reply` it defaults to dry-run.
+- `quota watch` is local-state-only progress monitoring. It must not read Telegram, create tasks, send replies, or skip tasks.
 - Scenario stop reasons should include `target_reached`, `manual_stop`, `moderation_warning`, `spam_complaint`, `too_many_stale_context`, `hourly_limit`, and `unsafe_context_ratio`.
 - Other agents must read this file first, dry-run before live quota replies, use `quota skip` when the context is not suitable, avoid filler messages just to reach a count, and stop automatically once `target_messages` is reached.
 - When one target reaches its count, mark that target done and prevent further sends to that chat for the active run. When all targets are done, mark the quota run done.

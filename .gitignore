@@ -44,6 +44,7 @@ tg-cli.audit.log
 /tg_cli/accounts/*.memory.sqlite3-*
 /tg_cli/accounts/*.bad-cases.jsonl
 /tg_cli/accounts/*.bad-cases.jsonl.*
+/tg_cli/downloads/
 
 # Builds and testing
 __pycache__/

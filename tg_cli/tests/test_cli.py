@@ -328,6 +328,416 @@ def test_badcase_parser_accepts_list_and_export_commands():
     assert export_args.json is True
 
 
+def test_entity_and_messages_parser_accepts_new_commands():
+    parser = cli.build_parser()
+
+    entity_args = parser.parse_args([
+        'entity', 'resolve', '@group', '--json'])
+    members_args = parser.parse_args([
+        'members', 'search', '长沙修车大堆群', '薇薇',
+        '--limit', '5', '--json'])
+    profile_args = parser.parse_args([
+        'profile', 'show', '薇薇',
+        '--chat', '长沙修车大堆群',
+        '--limit', '5',
+        '--json',
+    ])
+    history_args = parser.parse_args([
+        'messages', 'history', '5217114569',
+        '--limit', '50',
+        '--search', '开黑',
+        '--from-user', '@alice',
+        '--min-id', '10',
+        '--max-id', '100',
+        '--offset-id', '90',
+        '--offset-date', '2026-06-04T12:00:00+08:00',
+        '--reverse',
+        '--media-only',
+        '--json',
+    ])
+    send_args = parser.parse_args([
+        'messages', 'send', '5217114569', '来了兄弟们下午好',
+        '--reply-to', '7',
+        '--parse-mode', 'html',
+        '--no-link-preview',
+        '--silent',
+        '--dry-run',
+        '--json',
+    ])
+    file_args = parser.parse_args([
+        'messages', 'send-file', '5217114569', 'a.jpg', 'b.jpg',
+        '--caption', '两张图',
+        '--force-document',
+        '--reply-to', '8',
+        '--dry-run',
+        '--json',
+    ])
+    delete_args = parser.parse_args([
+        'messages', 'delete', '5217114569', '1', '2',
+        '--revoke', '--dry-run', '--json'])
+    forward_args = parser.parse_args([
+        'messages', 'forward', 'from-chat', '5217114569', '3', '4',
+        '--silent', '--dry-run', '--json'])
+    read_args = parser.parse_args([
+        'messages', 'read', '5217114569', '5',
+        '--clear-mentions', '--dry-run', '--json'])
+    pin_args = parser.parse_args([
+        'messages', 'pin', '5217114569', '6', '--notify', '--dry-run'])
+    unpin_args = parser.parse_args([
+        'messages', 'unpin', '5217114569', '6', '--dry-run'])
+
+    assert entity_args.command == 'entity'
+    assert entity_args.entity_command == 'resolve'
+    assert members_args.command == 'members'
+    assert members_args.members_command == 'search'
+    assert members_args.chat == '长沙修车大堆群'
+    assert members_args.query == '薇薇'
+    assert members_args.limit == 5
+    assert profile_args.command == 'profile'
+    assert profile_args.profile_command == 'show'
+    assert profile_args.query == '薇薇'
+    assert profile_args.chat == '长沙修车大堆群'
+    assert history_args.messages_command == 'history'
+    assert history_args.limit == 50
+    assert history_args.search == '开黑'
+    assert history_args.from_user == '@alice'
+    assert history_args.reverse is True
+    assert history_args.media_only is True
+    assert send_args.messages_command == 'send'
+    assert send_args.reply_to == 7
+    assert send_args.parse_mode == 'html'
+    assert send_args.link_preview is False
+    assert send_args.silent is True
+    assert file_args.messages_command == 'send-file'
+    assert file_args.files == ['a.jpg', 'b.jpg']
+    assert file_args.force_document is True
+    assert delete_args.message_ids == ['1', '2']
+    assert delete_args.revoke is True
+    assert forward_args.from_chat == 'from-chat'
+    assert forward_args.to_chat == '5217114569'
+    assert forward_args.silent is True
+    assert read_args.clear_mentions is True
+    assert pin_args.notify is True
+    assert unpin_args.messages_command == 'unpin'
+
+
+def test_telethon_coverage_parser_accepts_new_command_families():
+    parser = cli.build_parser()
+
+    auth_args = parser.parse_args(['auth', 'status', '--json'])
+    dialog_args = parser.parse_args([
+        'dialog', 'archive', '5217114569', '--dry-run', '--json'])
+    members_args = parser.parse_args([
+        'members', 'list', '5217114569',
+        '--filter', 'admins', '--limit', '10', '--json'])
+    profile_args = parser.parse_args([
+        'profile', 'photos', '5217114569', '--limit', '3', '--json'])
+    get_args = parser.parse_args([
+        'messages', 'get', '5217114569', '10', '11', '--json'])
+    search_args = parser.parse_args([
+        'messages', 'search', '开黑', '--global',
+        '--filter', 'photos', '--json'])
+    copy_args = parser.parse_args([
+        'messages', 'copy', 'source', '5217114569', '12',
+        '--dry-run', '--json'])
+    action_args = parser.parse_args([
+        'messages', 'action', '5217114569', 'typing',
+        '--duration', '1', '--dry-run', '--json'])
+    drafts_args = parser.parse_args([
+        'drafts', 'set', '5217114569', '草稿',
+        '--dry-run', '--json'])
+    downloads_args = parser.parse_args([
+        'downloads', 'media', '5217114569', '10', '--json'])
+    admin_args = parser.parse_args([
+        'admin', 'permissions', 'set', '5217114569',
+        '--user', 'alice', '--disable', 'send_messages',
+        '--dry-run', '--json'])
+    bot_args = parser.parse_args([
+        'bot', 'inline-send', '@like', 'hello', '5217114569',
+        '--index', '1', '--dry-run', '--json'])
+
+    assert auth_args.command == 'auth'
+    assert auth_args.auth_command == 'status'
+    assert dialog_args.dialog_command == 'archive'
+    assert members_args.members_command == 'list'
+    assert members_args.filter == 'admins'
+    assert profile_args.profile_command == 'photos'
+    assert get_args.messages_command == 'get'
+    assert get_args.message_ids == ['10', '11']
+    assert search_args.global_search is True
+    assert search_args.filter == 'photos'
+    assert copy_args.messages_command == 'copy'
+    assert action_args.duration == 1.0
+    assert drafts_args.drafts_command == 'set'
+    assert downloads_args.downloads_command == 'media'
+    assert downloads_args.message_id == 10
+    assert admin_args.permissions_command == 'set'
+    assert admin_args.disable == ['send_messages']
+    assert bot_args.bot_command == 'inline-send'
+    assert bot_args.index == 1
+
+
+def test_cmd_downloads_media_json(monkeypatch, tmp_path, capsys):
+    captured = {}
+
+    async def fake_download_media(config, chat, message_id, **kwargs):
+        captured['chat'] = chat
+        captured['message_id'] = message_id
+        captured.update(kwargs)
+        return {
+            'kind': 'media',
+            'path': str(tmp_path / 'downloads' / 'media.bin'),
+            'chat': {'id': 5217114569, 'title': 'test chat'},
+            'message_id': message_id,
+        }
+
+    monkeypatch.setattr(cli, 'download_media', fake_download_media)
+    config = AppConfig(
+        api_id=1,
+        api_hash='hash',
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+    )
+    args = cli.build_parser().parse_args([
+        'downloads', 'media', '5217114569', '10',
+        '--output-dir', str(tmp_path / 'downloads'),
+        '--json',
+    ])
+
+    cli._run(cli._cmd_downloads(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['path'].endswith('media.bin')
+    assert captured['chat'] == '5217114569'
+    assert captured['message_id'] == 10
+    assert captured['output_dir'] == str(tmp_path / 'downloads')
+
+
+def test_cmd_admin_permissions_set_json(monkeypatch, tmp_path, capsys):
+    captured = {}
+
+    async def fake_admin_permissions_set(config, chat, **kwargs):
+        captured['chat'] = chat
+        captured.update(kwargs)
+        return {
+            'updated': False,
+            'dry_run': True,
+            'chat': {'id': 5217114569, 'title': 'test chat'},
+            'permissions': {'send_messages': False},
+        }
+
+    monkeypatch.setattr(cli, 'admin_permissions_set', fake_admin_permissions_set)
+    config = AppConfig(
+        api_id=1,
+        api_hash='hash',
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+    )
+    args = cli.build_parser().parse_args([
+        'admin', 'permissions', 'set', '5217114569',
+        '--user', 'alice',
+        '--disable', 'send_messages',
+        '--dry-run',
+        '--json',
+    ])
+
+    cli._run(cli._cmd_admin(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['dry_run'] is True
+    assert captured['chat'] == '5217114569'
+    assert captured['user'] == 'alice'
+    assert captured['disabled_permissions'] == ['send_messages']
+
+
+def test_cmd_entity_resolve_json(monkeypatch, tmp_path, capsys):
+    async def fake_resolve_entity(config, query, allow_users=True):
+        return {
+            'id': 5217114569,
+            'peer_id': -1005217114569,
+            'title': 'test chat',
+            'kind': 'supergroup',
+            'username': 'test_chat',
+        }
+
+    monkeypatch.setattr(cli, 'resolve_entity', fake_resolve_entity)
+    config = AppConfig(
+        api_id=1,
+        api_hash='hash',
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+    )
+    args = cli.build_parser().parse_args([
+        'entity', 'resolve', '@test_chat', '--json'])
+
+    cli._run(cli._cmd_entity(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['kind'] == 'supergroup'
+    assert payload['peer_id'] == -1005217114569
+
+
+def test_cmd_members_search_json(monkeypatch, tmp_path, capsys):
+    async def fake_search_members(config, chat, query, limit=20):
+        return {
+            'chat': {'id': 5217114569, 'title': chat},
+            'query': query,
+            'members': [{
+                'id': 88,
+                'peer_id': 88,
+                'title': '薇薇',
+                'kind': 'user',
+                'username': 'vv_user',
+                'participants_count': None,
+            }],
+        }
+
+    monkeypatch.setattr(cli, 'search_members', fake_search_members)
+    config = AppConfig(
+        api_id=1,
+        api_hash='hash',
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+    )
+    args = cli.build_parser().parse_args([
+        'members', 'search', '长沙修车大堆群', '薇薇', '--json'])
+
+    cli._run(cli._cmd_members(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['chat']['title'] == '长沙修车大堆群'
+    assert payload['members'][0]['title'] == '薇薇'
+
+
+def test_cmd_profile_show_json(monkeypatch, tmp_path, capsys):
+    async def fake_show_profile(config, query, chat=None, limit=20):
+        return {
+            'source': 'chat_member',
+            'chat': {'id': 5217114569, 'title': chat},
+            'profile': {
+                'id': 88,
+                'peer_id': 88,
+                'title': query,
+                'kind': 'user',
+                'username': 'vv_user',
+                'display_name': query,
+                'about': '公开简介',
+                'has_profile_photo': True,
+                'verified': False,
+                'premium': False,
+                'restricted': False,
+                'scam': False,
+                'fake': False,
+            },
+        }
+
+    monkeypatch.setattr(cli, 'show_profile', fake_show_profile)
+    config = AppConfig(
+        api_id=1,
+        api_hash='hash',
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+    )
+    args = cli.build_parser().parse_args([
+        'profile', 'show', '薇薇',
+        '--chat', '长沙修车大堆群',
+        '--json'])
+
+    cli._run(cli._cmd_profile(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['source'] == 'chat_member'
+    assert payload['profile']['display_name'] == '薇薇'
+    assert payload['profile']['about'] == '公开简介'
+
+
+def test_cmd_messages_send_file_json(monkeypatch, tmp_path, capsys):
+    captured = {}
+
+    async def fake_send_media(config, chat, files, **kwargs):
+        captured['chat'] = chat
+        captured['files'] = files
+        captured.update(kwargs)
+        return {
+            'sent': False,
+            'dry_run': True,
+            'chat': {'id': 5217114569, 'title': 'test chat'},
+            'message_ids': [],
+            'files': files,
+        }
+
+    monkeypatch.setattr(cli, 'send_media', fake_send_media)
+    config = AppConfig(
+        api_id=1,
+        api_hash='hash',
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+    )
+    args = cli.build_parser().parse_args([
+        'messages', 'send-file', '5217114569', 'a.jpg',
+        '--caption', '看图',
+        '--force-document',
+        '--dry-run',
+        '--json',
+    ])
+
+    cli._run(cli._cmd_messages(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['dry_run'] is True
+    assert captured['chat'] == '5217114569'
+    assert captured['files'] == ['a.jpg']
+    assert captured['caption'] == '看图'
+    assert captured['force_document'] is True
+
+
+def test_cmd_messages_delete_json(monkeypatch, tmp_path, capsys):
+    captured = {}
+
+    async def fake_delete_messages(config, chat, message_ids, **kwargs):
+        captured['chat'] = chat
+        captured['message_ids'] = message_ids
+        captured.update(kwargs)
+        return {
+            'deleted': False,
+            'dry_run': True,
+            'chat': {'id': 5217114569, 'title': 'test chat'},
+            'message_ids': message_ids,
+        }
+
+    monkeypatch.setattr(cli, 'delete_messages', fake_delete_messages)
+    config = AppConfig(
+        api_id=1,
+        api_hash='hash',
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+    )
+    args = cli.build_parser().parse_args([
+        'messages', 'delete', '5217114569', '10', '11',
+        '--revoke', '--dry-run', '--json'])
+
+    cli._run(cli._cmd_messages(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['message_ids'] == [10, 11]
+    assert captured['revoke'] is True
+    assert captured['dry_run'] is True
+
+
 def test_badcase_list_json_does_not_require_credentials(tmp_path, capsys):
     config = AppConfig(
         api_id=None,
@@ -919,6 +1329,246 @@ def test_quota_skip_marks_task_without_credentials(
         'task_id': 'task-1',
         'reason': 'stale_context',
     }
+
+
+def test_quota_step_without_reply_creates_task_and_reports_progress(
+        tmp_path, monkeypatch, capsys):
+    async def fake_next_context_payload(config):
+        return {
+            'task': {
+                'id': 'task-1',
+                'status': 'pending',
+                'chat_id': 5217114569,
+            },
+            'context': {'prompt': 'Reply if useful.'},
+            'status': {
+                'run_id': 'quota-test',
+                'status': 'active',
+                'targets': [{
+                    'chat_id': 5217114569,
+                    'target_count': 140,
+                    'sent_count': 1,
+                    'status': 'active',
+                }],
+                'tasks': [],
+            },
+        }
+
+    monkeypatch.setattr(
+        cli, '_quota_next_context_payload', fake_next_context_payload)
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        quota_config={'state_path': str(tmp_path / 'quota-state.json')},
+    )
+
+    args = cli.build_parser().parse_args(['quota', 'step', '--json'])
+    cli._run(cli._cmd_quota(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['action'] == 'next'
+    assert payload['task']['id'] == 'task-1'
+    assert payload['progress']['sent_count'] == 1
+    assert payload['progress']['target_count'] == 140
+    assert payload['progress']['remaining_count'] == 139
+    assert payload['next_action'] == 'reply_or_skip'
+
+
+def test_quota_step_reply_defaults_to_dry_run(
+        tmp_path, monkeypatch, capsys):
+    captured = []
+
+    async def fake_next_context_payload(config):
+        return {
+            'task': {
+                'id': 'task-1',
+                'status': 'pending',
+                'chat_id': 5217114569,
+            },
+            'context': {'prompt': 'Reply if useful.'},
+            'status': {
+                'run_id': 'quota-test',
+                'status': 'active',
+                'targets': [{
+                    'chat_id': 5217114569,
+                    'target_count': 2,
+                    'sent_count': 0,
+                    'status': 'active',
+                }],
+                'tasks': [],
+            },
+        }
+
+    class FakeQuotaStore:
+        def get_task(self, path, task_id):
+            return {
+                'id': task_id,
+                'status': 'pending',
+                'chat': {'id': 5217114569, 'title': 'test chat'},
+                'profile': {'style': 'brief', 'forbidden_terms': []},
+            }
+
+    async def fake_send_reply(config, task_id, task, text, dry_run=False):
+        captured.append({
+            'task_id': task_id,
+            'text': text,
+            'dry_run': dry_run,
+        })
+        return ({
+            'sent': False,
+            'dry_run': dry_run,
+            'task_id': task_id,
+            'chat': {'id': 5217114569, 'title': 'test chat'},
+            'message_ids': [],
+            'parts': [text],
+        }, False)
+
+    monkeypatch.setattr(cli, 'quota_store', FakeQuotaStore())
+    monkeypatch.setattr(
+        cli, '_quota_next_context_payload', fake_next_context_payload)
+    monkeypatch.setattr(cli, '_quota_send_reply', fake_send_reply)
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        quota_config={'state_path': str(tmp_path / 'quota-state.json')},
+    )
+
+    args = cli.build_parser().parse_args([
+        'quota', 'step', '--reply', '西瓜现在甜不甜呀', '--json'])
+    cli._run(cli._cmd_quota(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['action'] == 'dry_run'
+    assert payload['dry_run']['sent'] is False
+    assert payload['dry_run']['dry_run'] is True
+    assert 'send' not in payload
+    assert captured == [{
+        'task_id': 'task-1',
+        'text': '西瓜现在甜不甜呀',
+        'dry_run': True,
+    }]
+
+
+def test_quota_step_reply_send_runs_dry_run_before_send(
+        tmp_path, monkeypatch, capsys):
+    captured = []
+
+    async def fake_next_context_payload(config):
+        return {
+            'task': {
+                'id': 'task-1',
+                'status': 'pending',
+                'chat_id': 5217114569,
+            },
+            'context': {'prompt': 'Reply if useful.'},
+            'status': {
+                'run_id': 'quota-test',
+                'status': 'active',
+                'targets': [{
+                    'chat_id': 5217114569,
+                    'target_count': 2,
+                    'sent_count': 0,
+                    'status': 'active',
+                }],
+                'tasks': [],
+            },
+        }
+
+    class FakeQuotaStore:
+        def get_task(self, path, task_id):
+            return {
+                'id': task_id,
+                'status': 'pending',
+                'chat': {'id': 5217114569, 'title': 'test chat'},
+                'profile': {'style': 'brief', 'forbidden_terms': []},
+            }
+
+    async def fake_send_reply(config, task_id, task, text, dry_run=False):
+        captured.append(dry_run)
+        message_ids = [] if dry_run else [42]
+        return ({
+            'sent': not dry_run,
+            'dry_run': dry_run,
+            'task_id': task_id,
+            'chat': {'id': 5217114569, 'title': 'test chat'},
+            'message_ids': message_ids,
+            'parts': [text],
+            'task': {
+                'id': task_id,
+                'status': 'completed' if not dry_run else 'pending',
+                'message_ids': message_ids,
+            },
+        }, False)
+
+    monkeypatch.setattr(cli, 'quota_store', FakeQuotaStore())
+    monkeypatch.setattr(
+        cli, '_quota_next_context_payload', fake_next_context_payload)
+    monkeypatch.setattr(cli, '_quota_send_reply', fake_send_reply)
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        quota_config={'state_path': str(tmp_path / 'quota-state.json')},
+    )
+
+    args = cli.build_parser().parse_args([
+        'quota', 'step', '--reply', '西瓜现在甜不甜呀', '--send', '--json'])
+    cli._run(cli._cmd_quota(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload['action'] == 'send'
+    assert payload['dry_run']['dry_run'] is True
+    assert payload['send']['sent'] is True
+    assert payload['send']['message_ids'] == [42]
+    assert captured == [True, False]
+
+
+def test_quota_watch_reads_progress_without_credentials(
+        tmp_path, monkeypatch, capsys):
+    class FakeQuotaStore:
+        def status(self, path):
+            return {
+                'run_id': 'quota-test',
+                'status': 'active',
+                'targets': [{
+                    'chat_id': 5217114569,
+                    'target_count': 140,
+                    'sent_count': 12,
+                    'status': 'active',
+                }],
+                'tasks': [],
+            }
+
+    monkeypatch.setattr(cli, 'quota_store', FakeQuotaStore())
+    config = AppConfig(
+        api_id=None,
+        api_hash=None,
+        session_path=tmp_path / 'printer.session',
+        allowed_chats=[5217114569],
+        state_path=tmp_path / '.tg-cli-state.json',
+        audit_log_path=tmp_path / 'tg-cli.audit.log',
+        quota_config={'state_path': str(tmp_path / 'quota-state.json')},
+    )
+
+    args = cli.build_parser().parse_args([
+        'quota', 'watch', '--interval', '0', '--count', '2', '--json'])
+    cli._run(cli._cmd_quota(args, config))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload['snapshots']) == 2
+    assert payload['snapshots'][0]['progress']['sent_count'] == 12
+    assert payload['snapshots'][0]['progress']['remaining_count'] == 128
 
 
 def test_scenario_list_and_show_do_not_require_credentials(

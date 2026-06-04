@@ -122,6 +122,211 @@ class FakeTelegramClient:
         return SimpleNamespace(id=100 + len(self.sent_texts))
 
 
+class AsyncIter:
+    def __init__(self, items):
+        self.items = list(items)
+
+    def __aiter__(self):
+        self.index = 0
+        return self
+
+    async def __anext__(self):
+        if self.index >= len(self.items):
+            raise StopAsyncIteration
+        item = self.items[self.index]
+        self.index += 1
+        return item
+
+
+class FakeMessage:
+    def __init__(self, message_id, text, sender=None, media=None, out=False):
+        self.id = message_id
+        self.message = text
+        self.sender_id = getattr(sender, 'id', None)
+        self._sender = sender
+        self.media = media
+        self.out = out
+        self.reply_to_msg_id = None
+        self.date = telegram_ops._dt.datetime(
+            2026, 6, 4, 12, 0, tzinfo=telegram_ops._dt.timezone.utc)
+
+    async def get_sender(self):
+        return self._sender
+
+
+class FakeOpsClient:
+    def __init__(self, messages=None, participants=None, full_user=None,
+                 drafts=None, admin_events=None, inline_results=None):
+        self.messages = list(messages or [])
+        self.participants = list(participants or [])
+        self.full_user = full_user
+        self.drafts = list(drafts or [])
+        self.admin_events = list(admin_events or [])
+        self.inline_results = list(inline_results or [])
+        self.iter_messages_calls = []
+        self.iter_participants_calls = []
+        self.iter_admin_log_calls = []
+        self.sent_files = []
+        self.edits = []
+        self.deletes = []
+        self.forwards = []
+        self.reads = []
+        self.pins = []
+        self.unpins = []
+        self.get_messages_calls = []
+        self.downloads = []
+        self.profile_downloads = []
+        self.folder_edits = []
+        self.dialog_deletes = []
+        self.permission_reads = []
+        self.permission_edits = []
+        self.admin_edits = []
+        self.kicks = []
+        self.inline_queries = []
+        self.actions = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def iter_messages(self, entity, **kwargs):
+        self.iter_messages_calls.append({'entity': entity, 'kwargs': kwargs})
+        return AsyncIter(self.messages)
+
+    def iter_participants(self, entity, **kwargs):
+        self.iter_participants_calls.append({'entity': entity, 'kwargs': kwargs})
+        return AsyncIter(self.participants)
+
+    def iter_admin_log(self, entity, **kwargs):
+        self.iter_admin_log_calls.append({'entity': entity, 'kwargs': kwargs})
+        return AsyncIter(self.admin_events)
+
+    async def __call__(self, request, ordered=False):
+        return self.full_user
+
+    async def get_messages(self, entity, ids=None, **kwargs):
+        self.get_messages_calls.append({
+            'entity': entity,
+            'ids': ids,
+            'kwargs': kwargs,
+        })
+        if isinstance(ids, list):
+            return self.messages[:len(ids)]
+        return self.messages[0] if self.messages else None
+
+    async def get_drafts(self, entity=None):
+        if entity is None:
+            return self.drafts
+        return self.drafts[0] if self.drafts else None
+
+    async def send_file(self, entity, files, **kwargs):
+        self.sent_files.append({'entity': entity, 'files': files, 'kwargs': kwargs})
+        return [SimpleNamespace(id=201), SimpleNamespace(id=202)]
+
+    async def edit_message(self, entity, message_id, text, **kwargs):
+        self.edits.append({
+            'entity': entity,
+            'message_id': message_id,
+            'text': text,
+            'kwargs': kwargs,
+        })
+        return SimpleNamespace(id=message_id)
+
+    async def delete_messages(self, entity, message_ids, **kwargs):
+        self.deletes.append({
+            'entity': entity,
+            'message_ids': message_ids,
+            'kwargs': kwargs,
+        })
+        return SimpleNamespace(id=1)
+
+    async def forward_messages(self, to_entity, message_ids, from_entity, **kwargs):
+        self.forwards.append({
+            'to_entity': to_entity,
+            'from_entity': from_entity,
+            'message_ids': message_ids,
+            'kwargs': kwargs,
+        })
+        return [SimpleNamespace(id=301)]
+
+    async def send_read_acknowledge(self, entity, **kwargs):
+        self.reads.append({'entity': entity, 'kwargs': kwargs})
+        return True
+
+    async def pin_message(self, entity, message_id, **kwargs):
+        self.pins.append({
+            'entity': entity,
+            'message_id': message_id,
+            'kwargs': kwargs,
+        })
+        return SimpleNamespace(id=message_id)
+
+    async def unpin_message(self, entity, message=None, **kwargs):
+        self.unpins.append({
+            'entity': entity,
+            'message': message,
+            'kwargs': kwargs,
+        })
+        return SimpleNamespace(id=message)
+
+    async def download_media(self, message, file=None):
+        self.downloads.append({'message': message, 'file': file})
+        return '{}/media.bin'.format(file)
+
+    async def download_profile_photo(self, entity, file=None, download_big=True):
+        self.profile_downloads.append({
+            'entity': entity,
+            'file': file,
+            'download_big': download_big,
+        })
+        return '{}/profile.jpg'.format(file)
+
+    async def edit_folder(self, entity, folder):
+        self.folder_edits.append({'entity': entity, 'folder': folder})
+        return SimpleNamespace(id=folder)
+
+    async def delete_dialog(self, entity, revoke=False):
+        self.dialog_deletes.append({'entity': entity, 'revoke': revoke})
+        return SimpleNamespace(id=1)
+
+    async def get_permissions(self, entity, user=None):
+        self.permission_reads.append({'entity': entity, 'user': user})
+        return SimpleNamespace(is_admin=True, can_send_messages=True)
+
+    async def get_stats(self, entity, **kwargs):
+        return SimpleNamespace(messages=12, viewers=3)
+
+    async def edit_permissions(self, entity, user=None, **kwargs):
+        self.permission_edits.append({
+            'entity': entity,
+            'user': user,
+            'kwargs': kwargs,
+        })
+        return SimpleNamespace(id=1)
+
+    async def edit_admin(self, entity, user, **kwargs):
+        self.admin_edits.append({
+            'entity': entity,
+            'user': user,
+            'kwargs': kwargs,
+        })
+        return SimpleNamespace(id=1)
+
+    async def kick_participant(self, entity, user):
+        self.kicks.append({'entity': entity, 'user': user})
+        return SimpleNamespace(id=1)
+
+    async def inline_query(self, bot, query, **kwargs):
+        self.inline_queries.append({
+            'bot': bot,
+            'query': query,
+            'kwargs': kwargs,
+        })
+        return self.inline_results
+
+
 def test_remember_inbound_message_rejects_duplicate_ids():
     seen = set()
 
@@ -276,6 +481,446 @@ def test_group_context_summarizes_recent_history(monkeypatch, tmp_path):
     assert '最近 4 条消息' in data['summary']
     assert 'Codex/Claude' not in data['summary']
     assert data['guidance']
+
+
+def test_history_passes_filters_and_serializes_media(monkeypatch, tmp_path):
+    sender = SimpleNamespace(id=7, first_name='Alice', last_name=None)
+    filename_attr = type('DocumentAttributeFilename', (), {})()
+    filename_attr.file_name = 'clip.mp4'
+    video_attr = type('DocumentAttributeVideo', (), {})()
+    video_attr.duration = 12
+    video_attr.w = 640
+    video_attr.h = 360
+    document = SimpleNamespace(
+        id=99,
+        dc_id=2,
+        mime_type='video/mp4',
+        size=12345,
+        attributes=[filename_attr, video_attr],
+    )
+    media = SimpleNamespace(document=document, photo=None, webpage=None)
+    fake_client = FakeOpsClient([
+        FakeMessage(10, '带视频', sender=sender, media=media),
+    ])
+
+    async def fake_resolve_chat(client, chat, allow_users=False):
+        return 'entity', {'id': 5217114569, 'title': 'history chat'}
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    config = make_config(tmp_path)
+
+    row, messages = asyncio.run(telegram_ops.history(
+        config,
+        '5217114569',
+        20,
+        search='开黑',
+        from_user='@alice',
+        min_id=1,
+        max_id=100,
+        offset_id=50,
+        offset_date='2026-06-04T12:00:00+08:00',
+        reverse=True,
+        media_only=True))
+
+    assert row['title'] == 'history chat'
+    assert messages[0]['id'] == 10
+    assert messages[0]['sender_id'] == 7
+    assert messages[0]['media']['kind'] == 'document'
+    assert messages[0]['media']['file_name'] == 'clip.mp4'
+    assert messages[0]['media']['width'] == 640
+    call = fake_client.iter_messages_calls[0]
+    assert call['entity'] == 'entity'
+    assert call['kwargs']['limit'] == 20
+    assert call['kwargs']['search'] == '开黑'
+    assert call['kwargs']['from_user'] == '@alice'
+    assert call['kwargs']['min_id'] == 1
+    assert call['kwargs']['max_id'] == 100
+    assert call['kwargs']['offset_id'] == 50
+    assert call['kwargs']['reverse'] is True
+    assert call['kwargs']['offset_date'].tzinfo is not None
+
+
+def test_search_members_returns_sanitized_rows(monkeypatch, tmp_path):
+    user = SimpleNamespace(
+        id=88,
+        first_name='薇薇',
+        last_name=None,
+        username='vv_user',
+        bot=False,
+        photo=object(),
+        access_hash=123456,
+        phone='secret',
+    )
+    fake_client = FakeOpsClient(participants=[user])
+
+    async def fake_resolve_chat(client, chat):
+        return 'group-entity', {'id': 5217114569, 'title': '长沙修车大堆群'}
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    config = make_config(tmp_path)
+
+    payload = asyncio.run(telegram_ops.search_members(
+        config, '长沙修车大堆群', '薇薇', limit=5))
+
+    assert payload['chat']['title'] == '长沙修车大堆群'
+    assert payload['members'][0]['title'] == '薇薇'
+    assert payload['members'][0]['username'] == 'vv_user'
+    assert 'phone' not in payload['members'][0]
+    assert 'access_hash' not in payload['members'][0]
+    assert fake_client.iter_participants_calls == [{
+        'entity': 'group-entity',
+        'kwargs': {'search': '薇薇', 'limit': 5},
+    }]
+
+
+def test_show_profile_from_chat_returns_public_fields_only(
+        monkeypatch, tmp_path):
+    participant = SimpleNamespace(
+        id=88,
+        first_name='薇薇',
+        last_name=None,
+        username='vv_user',
+        bot=False,
+        photo=object(),
+        access_hash=123456,
+        phone='secret',
+        verified=True,
+        premium=True,
+        restricted=False,
+        scam=False,
+        fake=False,
+    )
+    full_user = SimpleNamespace(
+        full_user=SimpleNamespace(about='公开简介'),
+        users=[participant],
+    )
+    fake_client = FakeOpsClient(
+        participants=[participant], full_user=full_user)
+
+    async def fake_resolve_chat(client, chat):
+        return 'group-entity', {'id': 5217114569, 'title': '长沙修车大堆群'}
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    config = make_config(tmp_path)
+
+    payload = asyncio.run(telegram_ops.show_profile(
+        config, '薇薇', chat='长沙修车大堆群'))
+
+    profile = payload['profile']
+    assert payload['source'] == 'chat_member'
+    assert payload['chat']['title'] == '长沙修车大堆群'
+    assert profile['display_name'] == '薇薇'
+    assert profile['about'] == '公开简介'
+    assert profile['has_profile_photo'] is True
+    assert profile['verified'] is True
+    assert profile['premium'] is True
+    assert 'phone' not in profile
+    assert 'access_hash' not in profile
+
+
+def test_show_profile_from_chat_rejects_ambiguous_members(
+        monkeypatch, tmp_path):
+    users = [
+        SimpleNamespace(id=1, first_name='薇薇A', username='vva', bot=False),
+        SimpleNamespace(id=2, first_name='薇薇B', username='vvb', bot=False),
+    ]
+    fake_client = FakeOpsClient(participants=users)
+
+    async def fake_resolve_chat(client, chat):
+        return 'group-entity', {'id': 5217114569, 'title': '长沙修车大堆群'}
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    config = make_config(tmp_path)
+
+    with pytest.raises(telegram_ops.TelegramCliError, match='multiple'):
+        asyncio.run(telegram_ops.show_profile(
+            config, '薇薇', chat='长沙修车大堆群'))
+
+
+def test_send_media_dry_run_checks_caption_without_sending(
+        monkeypatch, tmp_path):
+    fake_client = FakeOpsClient()
+
+    async def fake_resolve_chat(client, chat):
+        return 'entity', {'id': 5217114569, 'title': 'media chat'}
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    config = make_config(tmp_path, profile={'forbidden_terms': ['禁词']})
+
+    with pytest.raises(safety.SafetyError, match='禁词'):
+        asyncio.run(telegram_ops.send_media(
+            config, '5217114569', ['a.jpg'], caption='这里有禁词',
+            dry_run=True))
+
+    result = asyncio.run(telegram_ops.send_media(
+        config, '5217114569', ['a.jpg'], caption='正常图片',
+        dry_run=True))
+
+    assert result['dry_run'] is True
+    assert result['message_ids'] == []
+    assert fake_client.sent_files == []
+
+
+def test_send_media_live_sends_file_with_options(monkeypatch, tmp_path):
+    fake_client = FakeOpsClient()
+
+    async def fake_resolve_chat(client, chat):
+        return 'entity', {'id': 5217114569, 'title': 'media chat'}
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    config = make_config(tmp_path)
+
+    result = asyncio.run(telegram_ops.send_media(
+        config, '5217114569', ['a.jpg', 'b.jpg'], caption='两张图',
+        force_document=True, reply_to=7, silent=True,
+        assume_yes=True))
+
+    assert result['sent'] is True
+    assert result['message_ids'] == [201, 202]
+    assert fake_client.sent_files == [{
+        'entity': 'entity',
+        'files': ['a.jpg', 'b.jpg'],
+        'kwargs': {
+            'force_document': True,
+            'caption': '两张图',
+            'reply_to': 7,
+            'silent': True,
+        },
+    }]
+
+
+def test_message_management_wrappers_call_telethon_methods(
+        monkeypatch, tmp_path):
+    fake_client = FakeOpsClient()
+
+    async def fake_resolve_chat(client, chat, allow_users=False):
+        if str(chat) == 'source':
+            return 'source-entity', {'id': 123, 'title': 'source chat'}
+        return 'target-entity', {'id': 5217114569, 'title': 'target chat'}
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    config = make_config(tmp_path)
+
+    edit = asyncio.run(telegram_ops.edit_message(
+        config, '5217114569', 10, '改好了', assume_yes=True))
+    delete = asyncio.run(telegram_ops.delete_messages(
+        config, '5217114569', [10, 11], revoke=True, assume_yes=True))
+    forward = asyncio.run(telegram_ops.forward_messages(
+        config, 'source', '5217114569', [10], silent=True, assume_yes=True))
+    read = asyncio.run(telegram_ops.mark_read(
+        config, '5217114569', [10], clear_mentions=True, assume_yes=True))
+    pin = asyncio.run(telegram_ops.pin_message_op(
+        config, '5217114569', 10, notify=True, assume_yes=True))
+    unpin = asyncio.run(telegram_ops.pin_message_op(
+        config, '5217114569', 10, unpin=True, assume_yes=True))
+
+    assert edit['edited'] is True
+    assert delete['deleted'] is True
+    assert forward['forwarded_message_ids'] == [301]
+    assert read['read'] is True
+    assert pin['pinned'] is True
+    assert unpin['unpinned'] is True
+    assert fake_client.edits[0]['message_id'] == 10
+    assert fake_client.deletes[0]['message_ids'] == [10, 11]
+    assert fake_client.deletes[0]['kwargs']['revoke'] is True
+    assert fake_client.forwards[0]['from_entity'] == 'source-entity'
+    assert fake_client.forwards[0]['to_entity'] == 'target-entity'
+    assert fake_client.reads[0]['kwargs']['message'] == [10]
+    assert fake_client.reads[0]['kwargs']['clear_mentions'] is True
+    assert fake_client.pins[0]['message_id'] == 10
+    assert fake_client.unpins[0]['message'] == 10
+
+
+def test_history_supports_message_filter_replies_and_scheduled(
+        monkeypatch, tmp_path):
+    sender = SimpleNamespace(id=7, first_name='Alice')
+    fake_client = FakeOpsClient([
+        FakeMessage(10, 'reply', sender=sender),
+    ])
+
+    async def fake_resolve_chat(client, chat, allow_users=False):
+        return 'entity', {'id': 5217114569, 'title': 'history chat'}
+
+    class FakeFilter:
+        pass
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    monkeypatch.setattr(
+        telegram_ops, '_message_filter', lambda value: FakeFilter())
+    config = make_config(tmp_path)
+
+    row, messages = asyncio.run(telegram_ops.history(
+        config, '5217114569', 20, message_filter='photos',
+        reply_to=99, scheduled=True))
+
+    assert row['title'] == 'history chat'
+    assert messages[0]['id'] == 10
+    call = fake_client.iter_messages_calls[0]
+    assert isinstance(call['kwargs']['filter'], FakeFilter)
+    assert call['kwargs']['reply_to'] == 99
+    assert call['kwargs']['scheduled'] is True
+
+
+def test_get_messages_by_ids_and_downloads_use_explicit_targets(
+        monkeypatch, tmp_path):
+    sender = SimpleNamespace(id=7, first_name='Alice')
+    fake_client = FakeOpsClient([
+        FakeMessage(10, 'with media', sender=sender),
+    ])
+
+    async def fake_resolve_chat(client, chat, allow_users=False):
+        return 'entity', {'id': 5217114569, 'title': 'download chat'}
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    config = make_config(tmp_path)
+
+    fetched = asyncio.run(telegram_ops.get_messages_by_ids(
+        config, '5217114569', [10]))
+    media = asyncio.run(telegram_ops.download_media(
+        config, '5217114569', 10, output_dir=tmp_path / 'downloads'))
+    profile = asyncio.run(telegram_ops.download_profile_photo(
+        config, '5217114569', output_dir=tmp_path / 'downloads',
+        big=False))
+
+    assert fetched['messages'][0]['id'] == 10
+    assert fake_client.get_messages_calls[0]['ids'] == [10]
+    assert fake_client.get_messages_calls[1]['ids'] == 10
+    assert media['path'].endswith('/media.bin')
+    assert profile['path'].endswith('/profile.jpg')
+    assert fake_client.profile_downloads[0]['download_big'] is False
+
+
+def test_draft_and_dialog_wrappers_use_safety_and_telethon(
+        monkeypatch, tmp_path):
+    draft_calls = []
+
+    class FakeDraft:
+        text = '已有草稿'
+        entity = SimpleNamespace(id=5217114569, title='draft chat')
+        date = None
+        link_preview = None
+        reply_to_msg_id = None
+
+        async def set_message(self, text, **kwargs):
+            draft_calls.append(('set', text, kwargs))
+
+        async def send(self):
+            draft_calls.append(('send',))
+            return SimpleNamespace(id=401)
+
+        async def delete(self):
+            draft_calls.append(('delete',))
+
+    fake_client = FakeOpsClient(drafts=[FakeDraft()])
+
+    async def fake_resolve_chat(client, chat, allow_users=False):
+        return 'entity', {'id': 5217114569, 'title': 'draft chat'}
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    config = make_config(tmp_path)
+
+    listed = asyncio.run(telegram_ops.list_drafts(config, '5217114569'))
+    set_result = asyncio.run(telegram_ops.set_draft(
+        config, '5217114569', '新草稿', assume_yes=True))
+    send_result = asyncio.run(telegram_ops.send_draft(
+        config, '5217114569', assume_yes=True))
+    delete_result = asyncio.run(telegram_ops.delete_draft(
+        config, '5217114569', assume_yes=True))
+    archive = asyncio.run(telegram_ops.dialog_folder(
+        config, '5217114569', 1, assume_yes=True))
+    dialog_deleted = asyncio.run(telegram_ops.dialog_delete(
+        config, '5217114569', revoke=True, assume_yes=True))
+
+    assert listed['drafts'][0]['text'] == '已有草稿'
+    assert set_result['updated'] is True
+    assert send_result['message_id'] == 401
+    assert delete_result['deleted'] is True
+    assert draft_calls[0][0] == 'set'
+    assert fake_client.folder_edits == [{'entity': 'entity', 'folder': 1}]
+    assert archive['updated'] is True
+    assert fake_client.dialog_deletes[0]['revoke'] is True
+    assert dialog_deleted['deleted'] is True
+
+
+def test_admin_and_inline_wrappers_are_sanitized_and_bounded(
+        monkeypatch, tmp_path):
+    event = SimpleNamespace(
+        id=1,
+        date=telegram_ops._dt.datetime(
+            2026, 6, 4, tzinfo=telegram_ops._dt.timezone.utc),
+        user_id=88,
+        action=SimpleNamespace(),
+        joined=True,
+    )
+
+    class InlineResult:
+        id = 'result-1'
+        type = 'article'
+        title = 'Inline title'
+        description = 'desc'
+
+        async def click(self, **kwargs):
+            return SimpleNamespace(id=501)
+
+    fake_client = FakeOpsClient(
+        admin_events=[event], inline_results=[InlineResult()])
+
+    async def fake_resolve_chat(client, chat, allow_users=False):
+        if str(chat) == '@bot':
+            return 'bot-entity', {
+                'id': 999,
+                'title': 'bot',
+                'kind': 'bot',
+            }
+        if str(chat) == 'user':
+            return 'user-entity', {'id': 88, 'title': 'user', 'kind': 'user'}
+        return 'chat-entity', {'id': 5217114569, 'title': 'admin chat'}
+
+    monkeypatch.setattr(telegram_ops, '_client', lambda cfg: fake_client)
+    monkeypatch.setattr(telegram_ops, 'resolve_chat', fake_resolve_chat)
+    config = make_config(tmp_path)
+
+    log = asyncio.run(telegram_ops.admin_log(
+        config, '5217114569', limit=5, join=True))
+    permissions = asyncio.run(telegram_ops.show_permissions(
+        config, '5217114569', user='user'))
+    stats = asyncio.run(telegram_ops.show_stats(config, '5217114569'))
+    edit_perm = asyncio.run(telegram_ops.admin_permissions_set(
+        config, '5217114569', user='user',
+        disabled_permissions=['send_messages'], assume_yes=True))
+    edit_admin = asyncio.run(telegram_ops.admin_edit_admin(
+        config, '5217114569', 'user',
+        enabled_rights=['delete_messages'], is_admin=True,
+        assume_yes=True))
+    kick = asyncio.run(telegram_ops.admin_kick(
+        config, '5217114569', 'user', assume_yes=True))
+    inline = asyncio.run(telegram_ops.bot_inline_query(
+        config, '@bot', 'hello', chat='5217114569'))
+    sent = asyncio.run(telegram_ops.bot_inline_send(
+        config, '@bot', 'hello', '5217114569',
+        dry_run=False, assume_yes=True))
+
+    assert log['events'][0]['joined'] is True
+    assert fake_client.iter_admin_log_calls[0]['kwargs']['join'] is True
+    assert permissions['permissions']['is_admin'] is True
+    assert stats['stats']['messages'] == 12
+    assert edit_perm['permissions']['send_messages'] is False
+    assert fake_client.permission_edits[0]['kwargs']['send_messages'] is False
+    assert edit_admin['rights']['delete_messages'] is True
+    assert fake_client.admin_edits[0]['kwargs']['is_admin'] is True
+    assert kick['kicked'] is True
+    assert inline['results'][0]['title'] == 'Inline title'
+    assert sent['message_ids'] == [501]
 
 
 def test_task_context_summary_drops_raw_message_tail(tmp_path):

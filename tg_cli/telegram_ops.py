@@ -9,8 +9,10 @@ import os
 import random
 import re
 import string
+from pathlib import Path
 
-from telethon import TelegramClient, events, utils
+from telethon import Button, TelegramClient, events, utils
+from telethon.tl import functions, types
 from telethon.tl.types import Channel, Chat, User
 
 from .config import normalize_chat_id
@@ -27,10 +29,156 @@ class TelegramCliError(RuntimeError):
 
 
 quota_store = None
+_UNSET = object()
+_DOWNLOAD_DIR_NAME = 'downloads'
+
+_MESSAGE_FILTERS = {
+    'photos': 'InputMessagesFilterPhotos',
+    'photo': 'InputMessagesFilterPhotos',
+    'videos': 'InputMessagesFilterVideo',
+    'video': 'InputMessagesFilterVideo',
+    'photo-video': 'InputMessagesFilterPhotoVideo',
+    'documents': 'InputMessagesFilterDocument',
+    'document': 'InputMessagesFilterDocument',
+    'files': 'InputMessagesFilterDocument',
+    'file': 'InputMessagesFilterDocument',
+    'urls': 'InputMessagesFilterUrl',
+    'url': 'InputMessagesFilterUrl',
+    'links': 'InputMessagesFilterUrl',
+    'music': 'InputMessagesFilterMusic',
+    'voice': 'InputMessagesFilterVoice',
+    'voices': 'InputMessagesFilterVoice',
+    'round-voice': 'InputMessagesFilterRoundVoice',
+    'round-video': 'InputMessagesFilterRoundVideo',
+    'gifs': 'InputMessagesFilterGif',
+    'gif': 'InputMessagesFilterGif',
+    'contacts': 'InputMessagesFilterContacts',
+    'contact': 'InputMessagesFilterContacts',
+    'geo': 'InputMessagesFilterGeo',
+    'locations': 'InputMessagesFilterGeo',
+    'chat-photos': 'InputMessagesFilterChatPhotos',
+    'pinned': 'InputMessagesFilterPinned',
+    'mentions': 'InputMessagesFilterMyMentions',
+    'phone-calls': 'InputMessagesFilterPhoneCalls',
+}
+
+_PARTICIPANT_FILTERS = {
+    'admins': 'ChannelParticipantsAdmins',
+    'admin': 'ChannelParticipantsAdmins',
+    'bots': 'ChannelParticipantsBots',
+    'bot': 'ChannelParticipantsBots',
+    'recent': 'ChannelParticipantsRecent',
+    'banned': 'ChannelParticipantsBanned',
+    'restricted': 'ChannelParticipantsBanned',
+    'kicked': 'ChannelParticipantsKicked',
+    'contacts': 'ChannelParticipantsContacts',
+    'search': 'ChannelParticipantsSearch',
+}
+
+_ADMIN_RIGHT_NAMES = (
+    'change_info', 'post_messages', 'edit_messages', 'delete_messages',
+    'ban_users', 'invite_users', 'pin_messages', 'add_admins',
+    'anonymous', 'manage_call', 'manage_topics', 'post_stories',
+    'edit_stories', 'delete_stories', 'manage_direct_messages',
+)
+
+_PERMISSION_NAMES = (
+    'view_messages', 'send_messages', 'send_media', 'send_stickers',
+    'send_gifs', 'send_games', 'send_inline', 'embed_link_previews',
+    'send_polls', 'change_info', 'invite_users', 'pin_messages',
+    'manage_topics', 'send_photos', 'send_videos', 'send_roundvideos',
+    'send_audios', 'send_voices', 'send_docs', 'send_plain',
+)
 
 
 def _client(config):
     return TelegramClient(str(config.session_path), config.api_id, config.api_hash)
+
+
+def _class_instance(class_name, *args, **kwargs):
+    cls = getattr(types, class_name, None)
+    if cls is None:
+        raise TelegramCliError(
+            'Telethon type is not available in this build: {}.'.format(
+                class_name))
+    return cls(*args, **kwargs)
+
+
+def _message_filter(value):
+    if value in (None, '', 'all', 'none'):
+        return None
+    key = str(value).strip().lower().replace('_', '-')
+    class_name = _MESSAGE_FILTERS.get(key)
+    if class_name is None:
+        raise TelegramCliError('Unsupported message filter: {}.'.format(value))
+    return _class_instance(class_name)
+
+
+def _participant_filter(value, query=''):
+    if value in (None, '', 'all', 'none'):
+        return None
+    key = str(value).strip().lower().replace('_', '-')
+    class_name = _PARTICIPANT_FILTERS.get(key)
+    if class_name is None:
+        raise TelegramCliError(
+            'Unsupported participant filter: {}.'.format(value))
+    if class_name in (
+            'ChannelParticipantsBanned', 'ChannelParticipantsKicked',
+            'ChannelParticipantsContacts', 'ChannelParticipantsSearch'):
+        return _class_instance(class_name, str(query or ''))
+    return _class_instance(class_name)
+
+
+def _nonempty_text(value, field_name='text'):
+    text = str(value or '').strip()
+    if not text:
+        raise TelegramCliError('{} must not be empty.'.format(field_name))
+    return text
+
+
+def _bool_options(names, enabled=None, disabled=None):
+    enabled = set(enabled or [])
+    disabled = set(disabled or [])
+    overlap = enabled & disabled
+    if overlap:
+        raise TelegramCliError(
+            'Permission/right flag cannot be both enabled and disabled: {}.'.format(
+                ', '.join(sorted(overlap))))
+    result = {}
+    for name in names:
+        if name in enabled:
+            result[name] = True
+        elif name in disabled:
+            result[name] = False
+    return result
+
+
+def _download_base_dir(config, output_dir=None):
+    if output_dir not in (None, ''):
+        base = Path(output_dir).expanduser()
+    else:
+        base = Path(config.session_path).parent / _DOWNLOAD_DIR_NAME
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _safe_output_file(base_dir, preferred_name):
+    name = str(preferred_name or '').strip()
+    if not name:
+        name = 'telegram-download'
+    name = name.replace(os.sep, '_')
+    if os.altsep:
+        name = name.replace(os.altsep, '_')
+    path = base_dir / name
+    if not path.exists():
+        return path
+    stem = path.stem or 'telegram-download'
+    suffix = path.suffix
+    for index in range(1, 10000):
+        candidate = base_dir / '{}-{}{}'.format(stem, index, suffix)
+        if not candidate.exists():
+            return candidate
+    raise TelegramCliError('Could not choose a unique output file name.')
 
 
 def _entity_kind(entity):
@@ -59,12 +207,390 @@ def _dialog_row(dialog):
     }
 
 
+def _entity_row(entity):
+    username = getattr(entity, 'username', None)
+    try:
+        peer_id = utils.get_peer_id(entity)
+    except Exception:
+        peer_id = getattr(entity, 'id', None)
+    display_name = ' '.join(
+        str(item).strip()
+        for item in (
+            getattr(entity, 'first_name', None),
+            getattr(entity, 'last_name', None),
+        )
+        if str(item or '').strip())
+    if not display_name:
+        display_name = utils.get_display_name(entity)
+    return {
+        'id': getattr(entity, 'id', None),
+        'peer_id': peer_id,
+        'title': (
+            getattr(entity, 'title', None)
+            or display_name
+            or getattr(entity, 'username', None)
+        ),
+        'kind': _entity_kind(entity),
+        'username': username,
+        'participants_count': getattr(entity, 'participants_count', None),
+        'bot': bool(getattr(entity, 'bot', False)),
+        'first_name': getattr(entity, 'first_name', None),
+        'last_name': getattr(entity, 'last_name', None),
+    }
+
+
+def _public_profile_row(entity, full_user=None):
+    row = _entity_row(entity)
+    about = getattr(full_user, 'about', None) if full_user is not None else None
+    row.update({
+        'display_name': row.get('title') or utils.get_display_name(entity),
+        'about': about,
+        'has_profile_photo': bool(getattr(entity, 'photo', None)),
+        'verified': bool(getattr(entity, 'verified', False)),
+        'premium': bool(getattr(entity, 'premium', False)),
+        'restricted': bool(getattr(entity, 'restricted', False)),
+        'scam': bool(getattr(entity, 'scam', False)),
+        'fake': bool(getattr(entity, 'fake', False)),
+    })
+    return row
+
+
+def _matching_member_rows(rows, query):
+    query_text = str(query or '').strip()
+    if not query_text:
+        return list(rows)
+    query_lower = query_text.casefold().lstrip('@')
+    exact = []
+    partial = []
+    for entity, row in rows:
+        title = str(row.get('title') or '')
+        username = str(row.get('username') or '')
+        if title == query_text or username.casefold() == query_lower:
+            exact.append((entity, row))
+            continue
+        if (
+                query_lower in title.casefold()
+                or query_lower in username.casefold()):
+            partial.append((entity, row))
+    return exact or partial
+
+
+def _select_member_match(matches, query):
+    if not matches:
+        raise TelegramCliError('No group member matched: {}.'.format(query))
+    if len(matches) == 1:
+        return matches[0]
+    names = ', '.join(
+        '{} ({})'.format(row.get('title') or '-', row.get('id'))
+        for _, row in matches[:10])
+    raise TelegramCliError(
+        'Member query matched multiple users: {}.'.format(names))
+
+
+def _kind_set(value):
+    if value in (None, ''):
+        return None
+    if isinstance(value, str):
+        values = [value]
+    else:
+        values = list(value)
+    return {str(item).strip().casefold() for item in values if str(item).strip()}
+
+
+def _row_matches(row, *, kinds=None, query=None, groups_only=False):
+    kind = str(row.get('kind') or '').casefold()
+    if groups_only and kind not in ('chat', 'supergroup', 'channel'):
+        return False
+    if kinds and kind not in kinds:
+        return False
+    if query not in (None, ''):
+        needle = str(query).casefold()
+        haystacks = [
+            row.get('title'),
+            row.get('username'),
+            row.get('id'),
+        ]
+        if not any(needle in str(item or '').casefold() for item in haystacks):
+            return False
+    return True
+
+
 def _format_ts(value):
     if value is None:
         return None
     if value.tzinfo is None:
         value = value.replace(tzinfo=_dt.timezone.utc)
     return value.isoformat()
+
+
+def _parse_datetime_arg(value):
+    if value in (None, ''):
+        return None
+    if isinstance(value, _dt.datetime):
+        return value
+    text = str(value).strip()
+    if text.endswith('Z'):
+        text = text[:-1] + '+00:00'
+    try:
+        return _dt.datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise TelegramCliError(
+            'Datetime must be ISO-8601, for example 2026-06-04T12:00:00+08:00.'
+        ) from exc
+
+
+def _message_id_list(values):
+    if values in (None, ''):
+        return []
+    if isinstance(values, int):
+        return [values]
+    if isinstance(values, str):
+        items = [values]
+    else:
+        items = list(values)
+    result = []
+    for item in items:
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError) as exc:
+            raise TelegramCliError('Message id must be an integer: {}.'.format(item)) from exc
+    return result
+
+
+def _attribute_value(attributes, cls_name, name):
+    for item in attributes or []:
+        if item.__class__.__name__ == cls_name and getattr(item, name, None) is not None:
+            return getattr(item, name)
+    return None
+
+
+def _media_row(media):
+    if media is None:
+        return None
+    row = {
+        'kind': media.__class__.__name__,
+    }
+    photo = getattr(media, 'photo', None)
+    document = getattr(media, 'document', None)
+    webpage = getattr(media, 'webpage', None)
+    if photo is not None:
+        row.update({
+            'kind': 'photo',
+            'id': getattr(photo, 'id', None),
+            'dc_id': getattr(photo, 'dc_id', None),
+            'ttl_seconds': getattr(media, 'ttl_seconds', None),
+        })
+    if document is not None:
+        attributes = getattr(document, 'attributes', None) or []
+        row.update({
+            'kind': 'document',
+            'id': getattr(document, 'id', None),
+            'dc_id': getattr(document, 'dc_id', None),
+            'mime_type': getattr(document, 'mime_type', None),
+            'size': getattr(document, 'size', None),
+            'file_name': _attribute_value(
+                attributes, 'DocumentAttributeFilename', 'file_name'),
+            'duration': _attribute_value(
+                attributes, 'DocumentAttributeAudio', 'duration')
+                or _attribute_value(attributes, 'DocumentAttributeVideo', 'duration'),
+            'width': _attribute_value(attributes, 'DocumentAttributeImageSize', 'w')
+                or _attribute_value(attributes, 'DocumentAttributeVideo', 'w'),
+            'height': _attribute_value(attributes, 'DocumentAttributeImageSize', 'h')
+                or _attribute_value(attributes, 'DocumentAttributeVideo', 'h'),
+            'ttl_seconds': getattr(media, 'ttl_seconds', None),
+        })
+    if webpage is not None:
+        row.update({
+            'kind': 'webpage',
+            'url': getattr(webpage, 'url', None),
+            'display_url': getattr(webpage, 'display_url', None),
+            'title': getattr(webpage, 'title', None),
+        })
+    if getattr(media, 'game', None) is not None:
+        row['kind'] = 'game'
+    if getattr(media, 'poll', None) is not None:
+        row['kind'] = 'poll'
+    return {key: value for key, value in row.items() if value is not None}
+
+
+async def _message_row(message, include_media=True):
+    sender = await message.get_sender()
+    media = _media_row(getattr(message, 'media', None)) if include_media else None
+    return {
+        'id': message.id,
+        'date': _format_ts(message.date),
+        'sender_id': getattr(sender, 'id', None) or getattr(message, 'sender_id', None),
+        'sender': utils.get_display_name(sender) if sender else None,
+        'out': bool(getattr(message, 'out', False)),
+        'text': getattr(message, 'message', None) or '',
+        'reply_to_msg_id': getattr(message, 'reply_to_msg_id', None),
+        'media': media,
+    }
+
+
+def _sent_message_ids(result):
+    if result is None:
+        return []
+    if isinstance(result, (list, tuple)):
+        return [
+            getattr(item, 'id', item)
+            for item in result
+            if getattr(item, 'id', item) is not None
+        ]
+    message_id = getattr(result, 'id', None)
+    return [message_id] if message_id is not None else []
+
+
+def _result_summary(result):
+    if result is None:
+        return None
+    if isinstance(result, (str, int, float, bool)):
+        return result
+    if isinstance(result, (list, tuple)):
+        return [_result_summary(item) for item in result]
+    return {
+        'type': result.__class__.__name__,
+        'id': getattr(result, 'id', None),
+    }
+
+
+def _safe_value(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, _dt.datetime):
+        return _format_ts(value)
+    if isinstance(value, (list, tuple)):
+        return [_safe_value(item) for item in value]
+    return value.__class__.__name__
+
+
+def _rights_row(rights, names):
+    if rights is None:
+        return None
+    row = {}
+    for name in names:
+        if hasattr(rights, name):
+            row[name] = bool(getattr(rights, name))
+    if hasattr(rights, 'until_date'):
+        row['until_date'] = _format_ts(getattr(rights, 'until_date'))
+    return row
+
+
+def _permissions_row(permissions):
+    if permissions is None:
+        return None
+    names = (
+        'is_admin', 'is_creator', 'has_default_permissions', 'is_banned',
+        'is_kicked', 'can_change_info', 'can_post_messages',
+        'can_edit_messages', 'can_delete_messages', 'can_ban_users',
+        'can_invite_users', 'can_pin_messages', 'can_add_admins',
+        'can_manage_call', 'can_send_messages', 'can_send_media',
+        'can_send_stickers', 'can_send_gifs', 'can_send_games',
+        'can_send_inline', 'can_embed_link_previews', 'can_send_polls',
+    )
+    row = {'type': permissions.__class__.__name__}
+    for name in names:
+        if hasattr(permissions, name):
+            row[name] = bool(getattr(permissions, name))
+    banned_rights = getattr(permissions, 'banned_rights', None)
+    if banned_rights is not None:
+        row['banned_rights'] = _rights_row(banned_rights, _PERMISSION_NAMES)
+    admin_rights = getattr(permissions, 'admin_rights', None)
+    if admin_rights is not None:
+        row['admin_rights'] = _rights_row(admin_rights, _ADMIN_RIGHT_NAMES)
+    return row
+
+
+def _draft_row(draft):
+    entity = getattr(draft, 'entity', None)
+    row = {
+        'chat': _entity_row(entity) if entity is not None else None,
+        'text': getattr(draft, 'text', None) or '',
+        'date': _format_ts(getattr(draft, 'date', None)),
+        'link_preview': getattr(draft, 'link_preview', None),
+        'reply_to_msg_id': getattr(draft, 'reply_to_msg_id', None),
+    }
+    return {key: value for key, value in row.items() if value is not None}
+
+
+def _admin_log_event_row(event):
+    action = getattr(event, 'action', None)
+    row = {
+        'id': getattr(event, 'id', None),
+        'date': _format_ts(getattr(event, 'date', None)),
+        'user_id': getattr(event, 'user_id', None),
+        'action': action.__class__.__name__ if action is not None else None,
+    }
+    for name in (
+            'changed_title', 'changed_about', 'changed_username',
+            'changed_photo', 'changed_invites', 'changed_sticker_set',
+            'changed_location', 'joined', 'left', 'joined_invite',
+            'joined_by_request', 'changed_admin', 'changed_restrictions',
+            'deleted_message', 'edited_message', 'pinned_message',
+            'stopped_poll', 'started_group_call', 'discarded_group_call',
+            'participant_muted', 'participant_unmuted',
+            'participant_volume_changed'):
+        try:
+            value = getattr(event, name)
+        except Exception:
+            continue
+        if isinstance(value, bool) and value:
+            row[name] = True
+    old = getattr(event, 'old', None)
+    new = getattr(event, 'new', None)
+    if old is not None:
+        row['old'] = _safe_value(old)
+    if new is not None:
+        row['new'] = _safe_value(new)
+    return {key: value for key, value in row.items() if value is not None}
+
+
+def _stats_row(stats):
+    if stats is None:
+        return None
+    row = {'type': stats.__class__.__name__}
+    for name in (
+            'period', 'followers', 'views_per_post', 'shares_per_post',
+            'enabled_notifications', 'growth_graph', 'followers_graph',
+            'mute_graph', 'top_hours_graph', 'interactions_graph',
+            'iv_interactions_graph', 'views_by_source_graph',
+            'new_followers_by_source_graph', 'languages_graph',
+            'messages', 'viewers', 'forwards', 'reactions_by_emotion_graph'):
+        if hasattr(stats, name):
+            row[name] = _safe_value(getattr(stats, name))
+    return row
+
+
+def _inline_result_row(result, index=0):
+    row = {
+        'index': index,
+        'id': getattr(result, 'id', None),
+        'type': getattr(result, 'type', None),
+        'title': getattr(result, 'title', None),
+        'description': getattr(result, 'description', None),
+        'url': getattr(result, 'url', None),
+    }
+    return {key: value for key, value in row.items() if value is not None}
+
+
+def _download_row(kind, path, chat=None, message_id=None, entity=None):
+    return {
+        'kind': kind,
+        'path': str(path) if path is not None else None,
+        'chat': chat,
+        'message_id': message_id,
+        'entity': entity,
+    }
+
+
+def _confirm_write(row, summary, assume_yes, input_func, output_func):
+    return safety.confirm_send(
+        row.get('title') or 'unknown',
+        row.get('id'),
+        summary,
+        assume_yes=assume_yes,
+        input_func=input_func,
+        output_func=output_func)
 
 
 _ENGLISH_STOP_WORDS = {
@@ -1081,15 +1607,25 @@ async def get_me(config):
         }
 
 
-async def list_dialogs(config, groups_only=False):
+async def list_dialogs(config, groups_only=False, limit=None, kind=None,
+                       query=None, archived=None, folder=None):
     config.require_credentials()
     rows = []
+    kinds = _kind_set(kind)
+    kwargs = {}
+    if limit is not None:
+        kwargs['limit'] = int(limit)
+    if archived is not None:
+        kwargs['archived'] = bool(archived)
+    elif folder is not None:
+        kwargs['folder'] = int(folder)
     async with _client(config) as client:
-        async for dialog in client.iter_dialogs():
+        async for dialog in client.iter_dialogs(**kwargs):
             row = _dialog_row(dialog)
-            if groups_only and row['kind'] not in ('chat', 'supergroup', 'channel'):
-                continue
-            rows.append(row)
+            if _row_matches(
+                    row, kinds=kinds, query=query,
+                    groups_only=groups_only):
+                rows.append(row)
     return rows
 
 
@@ -1118,26 +1654,462 @@ async def resolve_chat(client, query, allow_users=False):
     if len(matches) > 1:
         names = ', '.join('{} ({})'.format(row['title'], row['id']) for _, row in matches)
         raise TelegramCliError('Chat title matched multiple dialogs: {}'.format(names))
+    if hasattr(client, 'get_entity'):
+        try:
+            entity = await client.get_entity(query_text)
+        except Exception:
+            entity = None
+        if entity is not None:
+            row = _entity_row(entity)
+            if row['kind'] == 'user' and not allow_users:
+                raise TelegramCliError(
+                    'Entity is a user, but this command only accepts chats: {}.'.format(
+                        query))
+            return entity, row
     raise TelegramCliError('Chat not found: {}'.format(query))
 
 
-async def history(config, chat, limit):
+async def resolve_entity(config, query, allow_users=True):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(
+            client, query, allow_users=allow_users)
+        return row
+
+
+async def search_members(config, chat, query, limit=20):
+    config.require_credentials()
+    limit = int(limit)
+    if limit < 1:
+        raise TelegramCliError('limit must be greater than 0.')
+    async with _client(config) as client:
+        entity, chat_row = await resolve_chat(client, chat)
+        rows = []
+        async for user in client.iter_participants(
+                entity, search=str(query or ''), limit=limit):
+            rows.append(_entity_row(user))
+        return {
+            'chat': chat_row,
+            'query': str(query or ''),
+            'members': rows,
+        }
+
+
+async def show_profile(config, query, chat=None, limit=20):
+    config.require_credentials()
+    async with _client(config) as client:
+        source = 'entity'
+        chat_row = None
+        if chat not in (None, ''):
+            group_entity, chat_row = await resolve_chat(client, chat)
+            candidate_rows = []
+            async for user in client.iter_participants(
+                    group_entity, search=str(query or ''), limit=int(limit)):
+                candidate_rows.append((user, _entity_row(user)))
+            entity, row = _select_member_match(
+                _matching_member_rows(candidate_rows, query), query)
+            source = 'chat_member'
+        else:
+            entity, row = await resolve_chat(
+                client, query, allow_users=True)
+        if isinstance(entity, (Channel, Chat)):
+            raise TelegramCliError(
+                'Profile target must be a user or bot: {}.'.format(query))
+
+        full = await client(functions.users.GetFullUserRequest(entity))
+        full_user = getattr(full, 'full_user', None)
+        users = getattr(full, 'users', None) or []
+        profile_entity = users[0] if users else entity
+        return {
+            'source': source,
+            'chat': chat_row,
+            'profile': _public_profile_row(profile_entity, full_user=full_user),
+        }
+
+
+async def auth_status(config):
+    config.require_credentials()
+    client = _client(config)
+    await client.connect()
+    try:
+        authorized = await client.is_user_authorized()
+        me_row = None
+        is_bot = None
+        if authorized:
+            me = await client.get_me()
+            me_row = _public_profile_row(me)
+            is_bot = await client.is_bot()
+        return {
+            'authorized': bool(authorized),
+            'bot': bool(is_bot) if is_bot is not None else None,
+            'me': me_row,
+        }
+    finally:
+        await client.disconnect()
+
+
+async def auth_login(config, phone=None, bot_token=None, password=None,
+                     code_callback=None):
+    config.require_credentials()
+    client = _client(config)
+    kwargs = {}
+    if bot_token not in (None, ''):
+        kwargs['bot_token'] = bot_token
+    if phone not in (None, ''):
+        kwargs['phone'] = phone
+    if password not in (None, ''):
+        kwargs['password'] = password
+    if code_callback is not None:
+        kwargs['code_callback'] = code_callback
+    await client.start(**kwargs)
+    try:
+        me = await client.get_me()
+        return {'logged_in': True, 'me': _public_profile_row(me)}
+    finally:
+        await client.disconnect()
+
+
+async def auth_qr_login(config, display_func=print, password=None,
+                        timeout=None):
+    config.require_credentials()
+    client = _client(config)
+    await client.connect()
+    try:
+        qr_login = await client.qr_login()
+        display_func(getattr(qr_login, 'url', ''))
+        wait_kwargs = {}
+        if timeout is not None:
+            wait_kwargs['timeout'] = timeout
+        try:
+            await qr_login.wait(**wait_kwargs)
+        except Exception as exc:
+            if password in (None, ''):
+                raise
+            if exc.__class__.__name__ != 'SessionPasswordNeededError':
+                raise
+            await client.sign_in(password=password)
+        me = await client.get_me()
+        return {'logged_in': True, 'me': _public_profile_row(me)}
+    finally:
+        await client.disconnect()
+
+
+async def auth_logout(config, assume_yes=False, dry_run=False,
+                      input_func=input, output_func=print):
+    config.require_credentials()
+    summary = 'Log out current Telegram session'
+    row = {'id': None, 'title': 'current account'}
+    if dry_run:
+        return {'logged_out': False, 'dry_run': True}
+    if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+        return {'logged_out': False, 'dry_run': False}
+    client = _client(config)
+    await client.connect()
+    try:
+        result = await client.log_out()
+        return {'logged_out': bool(result), 'dry_run': False}
+    finally:
+        if getattr(client, 'session', None) is not None:
+            await client.disconnect()
+
+
+async def auth_edit_2fa(config, current_password=None, new_password=None,
+                        hint='', email=None, email_code_callback=None,
+                        assume_yes=False, dry_run=False,
+                        input_func=input, output_func=print):
+    config.require_credentials()
+    summary = 'Edit two-step verification settings'
+    row = {'id': None, 'title': 'current account'}
+    if dry_run:
+        return {'updated': False, 'dry_run': True}
+    if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+        return {'updated': False, 'dry_run': False}
+    async with _client(config) as client:
+        result = await client.edit_2fa(
+            current_password=current_password,
+            new_password=new_password,
+            hint=hint or '',
+            email=email,
+            email_code_callback=email_code_callback)
+        return {'updated': bool(result), 'dry_run': False}
+
+
+async def list_members(config, chat, limit=50, participant_filter=None,
+                       query='', aggressive=False):
+    config.require_credentials()
+    limit = int(limit)
+    if limit < 1:
+        raise TelegramCliError('limit must be greater than 0.')
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        rows = []
+        iter_kwargs = {'limit': limit}
+        if query not in (None, ''):
+            iter_kwargs['search'] = str(query)
+        parsed_filter = _participant_filter(participant_filter, query=query)
+        if parsed_filter is not None:
+            iter_kwargs['filter'] = parsed_filter
+        if aggressive:
+            iter_kwargs['aggressive'] = True
+        async for user in client.iter_participants(entity, **iter_kwargs):
+            rows.append(_entity_row(user))
+        return {'chat': row, 'members': rows, 'filter': participant_filter}
+
+
+async def admin_log(config, chat, limit=20, admins=None, search=None, **flags):
+    config.require_credentials()
+    limit = int(limit)
+    if limit < 1:
+        raise TelegramCliError('limit must be greater than 0.')
+    allowed_flags = {
+        'join', 'leave', 'invite', 'restrict', 'unrestrict', 'ban', 'unban',
+        'promote', 'demote', 'info', 'settings', 'pinned', 'edit',
+        'delete', 'group_call',
+    }
+    iter_kwargs = {'limit': limit}
+    for name in allowed_flags:
+        if flags.get(name) is not None:
+            iter_kwargs[name] = bool(flags[name])
+    if search not in (None, ''):
+        iter_kwargs['search'] = search
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        if admins:
+            admin_entities = [
+                (await resolve_chat(client, admin, allow_users=True))[0]
+                for admin in admins
+            ]
+            iter_kwargs['admins'] = admin_entities
+        rows = []
+        async for event in client.iter_admin_log(entity, **iter_kwargs):
+            rows.append(_admin_log_event_row(event))
+        return {'chat': row, 'events': rows}
+
+
+async def show_permissions(config, chat, user=None):
     config.require_credentials()
     async with _client(config) as client:
         entity, row = await resolve_chat(client, chat)
-        messages = []
-        async for message in client.iter_messages(entity, limit=limit):
-            sender = await message.get_sender()
-            messages.append({
-                'id': message.id,
-                'date': _format_ts(message.date),
-                'sender_id': getattr(sender, 'id', None),
-                'sender': utils.get_display_name(sender) if sender else None,
-                'out': bool(message.out),
-                'text': message.message or '',
+        user_row = None
+        user_entity = None
+        if user not in (None, ''):
+            user_entity, user_row = await resolve_chat(
+                client, user, allow_users=True)
+        permissions = await client.get_permissions(entity, user_entity)
+        return {
+            'chat': row,
+            'user': user_row,
+            'permissions': _permissions_row(permissions)
+                or _rights_row(permissions, _PERMISSION_NAMES),
+        }
+
+
+async def show_stats(config, chat, message_id=None):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        kwargs = {}
+        if message_id is not None:
+            kwargs['message'] = int(message_id)
+        stats = await client.get_stats(entity, **kwargs)
+        return {'chat': row, 'message_id': message_id, 'stats': _stats_row(stats)}
+
+
+async def list_profile_photos(config, query, limit=20):
+    config.require_credentials()
+    limit = int(limit)
+    if limit < 1:
+        raise TelegramCliError('limit must be greater than 0.')
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, query, allow_users=True)
+        photos = []
+        async for photo in client.iter_profile_photos(entity, limit=limit):
+            photos.append({
+                'id': getattr(photo, 'id', None),
+                'date': _format_ts(getattr(photo, 'date', None)),
+                'dc_id': getattr(photo, 'dc_id', None),
+                'type': photo.__class__.__name__,
             })
-        messages.reverse()
+        return {'entity': row, 'photos': photos}
+
+
+async def history(config, chat, limit, search=None, from_user=None,
+                  min_id=0, max_id=0, offset_id=0, offset_date=None,
+                  reverse=False, media_only=False, allow_users=False,
+                  message_filter=None, reply_to=None, scheduled=False,
+                  global_search=False):
+    config.require_credentials()
+    limit = int(limit)
+    if limit < 1:
+        raise TelegramCliError('limit must be greater than 0.')
+    async with _client(config) as client:
+        if global_search:
+            entity = None
+            row = {'id': None, 'title': 'global_search', 'kind': 'global'}
+        else:
+            entity, row = await resolve_chat(
+                client, chat, allow_users=allow_users)
+        iter_kwargs = {
+            'limit': limit,
+        }
+        if search not in (None, ''):
+            iter_kwargs['search'] = search
+        if from_user not in (None, ''):
+            iter_kwargs['from_user'] = from_user
+        if min_id:
+            iter_kwargs['min_id'] = int(min_id)
+        if max_id:
+            iter_kwargs['max_id'] = int(max_id)
+        if offset_id:
+            iter_kwargs['offset_id'] = int(offset_id)
+        parsed_offset_date = _parse_datetime_arg(offset_date)
+        if parsed_offset_date is not None:
+            iter_kwargs['offset_date'] = parsed_offset_date
+        if reverse:
+            iter_kwargs['reverse'] = True
+        parsed_filter = _message_filter(message_filter)
+        if parsed_filter is not None:
+            iter_kwargs['filter'] = parsed_filter
+        if reply_to is not None:
+            iter_kwargs['reply_to'] = int(reply_to)
+        if scheduled:
+            iter_kwargs['scheduled'] = True
+        messages = []
+        async for message in client.iter_messages(entity, **iter_kwargs):
+            item = await _message_row(message)
+            if media_only and not item.get('media'):
+                continue
+            messages.append(item)
+        if not reverse:
+            messages.reverse()
         return row, messages
+
+
+async def get_messages_by_ids(config, chat, message_ids, allow_users=False):
+    config.require_credentials()
+    ids = _message_id_list(message_ids)
+    if not ids:
+        raise TelegramCliError('At least one message id is required.')
+    async with _client(config) as client:
+        entity, row = await resolve_chat(
+            client, chat, allow_users=allow_users)
+        result = await client.get_messages(entity, ids=ids)
+        result_items = result if isinstance(result, (list, tuple)) else [result]
+        messages = []
+        for index, message in enumerate(result_items):
+            if message is None:
+                messages.append({'id': ids[index], 'missing': True})
+            else:
+                messages.append(await _message_row(message))
+        return {'chat': row, 'messages': messages}
+
+
+async def list_drafts(config, chat=None):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity = None
+        if chat not in (None, ''):
+            entity, _ = await resolve_chat(client, chat, allow_users=True)
+        drafts = await client.get_drafts(entity)
+        if drafts is None:
+            draft_items = []
+        elif isinstance(drafts, (list, tuple)):
+            draft_items = drafts
+        else:
+            draft_items = [drafts]
+        return {'drafts': [_draft_row(draft) for draft in draft_items]}
+
+
+async def set_draft(config, chat, text, parse_mode=_UNSET,
+                    link_preview=None, reply_to=None, assume_yes=False,
+                    dry_run=False, input_func=input, output_func=print):
+    config.require_credentials()
+    text = _nonempty_text(text)
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat, allow_users=True)
+        safety.require_can_write(config, row['id'])
+        safety.require_text_allowed(config, text)
+        summary = 'Set draft: {}'.format(text)
+        if dry_run:
+            safety.audit_record(
+                config, 'draft_set', row['id'], chat_title=row['title'],
+                text=text, dry_run=True, status='dry_run')
+            return {'updated': False, 'dry_run': True, 'chat': row}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'draft_set', row['id'], chat_title=row['title'],
+                text=text, status='cancelled')
+            return {'updated': False, 'dry_run': False, 'chat': row}
+        draft = await client.get_drafts(entity)
+        kwargs = {}
+        if parse_mode is not _UNSET:
+            kwargs['parse_mode'] = parse_mode
+        if link_preview is not None:
+            kwargs['link_preview'] = bool(link_preview)
+        if reply_to is not None:
+            kwargs['reply_to'] = int(reply_to)
+        await draft.set_message(text, **kwargs)
+        safety.audit_record(
+            config, 'draft_set', row['id'], chat_title=row['title'],
+            text=text, status='updated')
+        return {'updated': True, 'dry_run': False, 'chat': row}
+
+
+async def send_draft(config, chat, assume_yes=False, dry_run=False,
+                     input_func=input, output_func=print):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        safety.require_can_write(config, row['id'])
+        draft = await client.get_drafts(entity)
+        text = getattr(draft, 'text', '') or ''
+        safety.require_text_allowed(config, text)
+        summary = 'Send draft: {}'.format(text)
+        if dry_run:
+            safety.audit_record(
+                config, 'draft_send', row['id'], chat_title=row['title'],
+                text=text, dry_run=True, status='dry_run')
+            return {'sent': False, 'dry_run': True, 'chat': row,
+                    'message_id': None}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'draft_send', row['id'], chat_title=row['title'],
+                text=text, status='cancelled')
+            return {'sent': False, 'dry_run': False, 'chat': row,
+                    'message_id': None}
+        sent = await draft.send()
+        message_ids = _sent_message_ids(sent)
+        safety.audit_record(
+            config, 'draft_send', row['id'], chat_title=row['title'],
+            text=text, message_id=message_ids[0] if message_ids else None,
+            status='sent')
+        return {'sent': True, 'dry_run': False, 'chat': row,
+                'message_id': message_ids[0] if message_ids else None}
+
+
+async def delete_draft(config, chat, assume_yes=False, dry_run=False,
+                       input_func=input, output_func=print):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat, allow_users=True)
+        safety.require_can_write(config, row['id'])
+        summary = 'Delete draft'
+        if dry_run:
+            safety.audit_record(
+                config, 'draft_delete', row['id'], chat_title=row['title'],
+                text=summary, dry_run=True, status='dry_run')
+            return {'deleted': False, 'dry_run': True, 'chat': row}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'draft_delete', row['id'], chat_title=row['title'],
+                text=summary, status='cancelled')
+            return {'deleted': False, 'dry_run': False, 'chat': row}
+        draft = await client.get_drafts(entity)
+        await draft.delete()
+        safety.audit_record(
+            config, 'draft_delete', row['id'], chat_title=row['title'],
+            text=summary, status='deleted')
+        return {'deleted': True, 'dry_run': False, 'chat': row}
 
 
 async def group_context(config, chat, limit, operator='agent', preset=None):
@@ -1149,8 +2121,62 @@ async def group_context(config, chat, limit, operator='agent', preset=None):
         config, row, messages, operator=operator, preset=preset)
 
 
+def _button_from_spec(spec):
+    if isinstance(spec, str):
+        return Button.text(spec)
+    if not isinstance(spec, dict):
+        raise TelegramCliError('Button spec must be a string or JSON object.')
+    kind = str(spec.get('type') or 'text').strip().lower()
+    text = _nonempty_text(spec.get('text'), 'button text')
+    if kind == 'text':
+        return Button.text(
+            text,
+            resize=bool(spec.get('resize', False)),
+            single_use=bool(spec.get('single_use', False)))
+    if kind == 'inline':
+        data = spec.get('data')
+        if data is None:
+            data = text
+        if isinstance(data, str):
+            data = data.encode('utf-8')
+        return Button.inline(text, data=data)
+    if kind == 'url':
+        return Button.url(text, _nonempty_text(spec.get('url'), 'button url'))
+    if kind == 'switch_inline':
+        return Button.switch_inline(
+            text, str(spec.get('query') or ''),
+            same_peer=bool(spec.get('same_peer', False)))
+    if kind == 'clear':
+        return Button.clear()
+    if kind == 'force_reply':
+        return Button.force_reply()
+    raise TelegramCliError('Unsupported button type: {}.'.format(kind))
+
+
+def _buttons_from_json(value):
+    if value in (None, ''):
+        return None
+    data = json.loads(value) if isinstance(value, str) else value
+    if isinstance(data, dict):
+        return _button_from_spec(data)
+    if not isinstance(data, list):
+        raise TelegramCliError('buttons JSON must be an object or list.')
+    if not data:
+        return []
+    if all(not isinstance(item, list) for item in data):
+        return [_button_from_spec(item) for item in data]
+    return [
+        [_button_from_spec(item) for item in row]
+        for row in data
+    ]
+
+
 async def send_text(config, chat, text, assume_yes=False, dry_run=False,
-                    input_func=input, output_func=print):
+                    input_func=input, output_func=print, reply_to=None,
+                    parse_mode=_UNSET, link_preview=None, silent=None,
+                    schedule=None, clear_draft=False, background=None,
+                    comment_to=None, send_as=None, message_effect_id=None,
+                    buttons_json=None):
     config.require_credentials()
     async with _client(config) as client:
         entity, row = await resolve_chat(client, chat)
@@ -1169,19 +2195,759 @@ async def send_text(config, chat, text, assume_yes=False, dry_run=False,
                 text=text, dry_run=True, status='dry_run')
             return {'sent': False, 'dry_run': True, 'chat': row, 'message_id': None}
 
-        if not safety.confirm_send(
-                row['title'], row['id'], text, assume_yes=assume_yes,
-                input_func=input_func, output_func=output_func):
+        if not _confirm_write(row, text, assume_yes, input_func, output_func):
             safety.audit_record(
                 config, 'send', row['id'], chat_title=row['title'],
                 text=text, status='cancelled')
             return {'sent': False, 'dry_run': False, 'chat': row, 'message_id': None}
 
-        sent = await client.send_message(entity, text)
+        kwargs = {}
+        if reply_to is not None:
+            kwargs['reply_to'] = int(reply_to)
+        if parse_mode is not _UNSET:
+            kwargs['parse_mode'] = parse_mode
+        if link_preview is not None:
+            kwargs['link_preview'] = bool(link_preview)
+        if silent is not None:
+            kwargs['silent'] = bool(silent)
+        if clear_draft:
+            kwargs['clear_draft'] = True
+        if background is not None:
+            kwargs['background'] = bool(background)
+        if comment_to is not None:
+            kwargs['comment_to'] = int(comment_to)
+        if send_as not in (None, ''):
+            kwargs['send_as'] = send_as
+        if message_effect_id is not None:
+            kwargs['message_effect_id'] = int(message_effect_id)
+        buttons = _buttons_from_json(buttons_json)
+        if buttons is not None:
+            kwargs['buttons'] = buttons
+        parsed_schedule = _parse_datetime_arg(schedule)
+        if parsed_schedule is not None:
+            kwargs['schedule'] = parsed_schedule
+        sent = await client.send_message(entity, text, **kwargs)
         safety.audit_record(
             config, 'send', row['id'], chat_title=row['title'],
             text=text, message_id=sent.id, status='sent')
         return {'sent': True, 'dry_run': False, 'chat': row, 'message_id': sent.id}
+
+
+async def send_media(config, chat, files, caption=None, force_document=False,
+                     reply_to=None, silent=None, schedule=None,
+                     assume_yes=False, dry_run=False, input_func=input,
+                     output_func=print, voice_note=False, video_note=False,
+                     supports_streaming=False, thumb=None, ttl=None,
+                     mime_type=None, clear_draft=False, background=None,
+                     comment_to=None, send_as=None, message_effect_id=None,
+                     buttons_json=None):
+    config.require_credentials()
+    file_items = list(files if isinstance(files, (list, tuple)) else [files])
+    if not file_items:
+        raise TelegramCliError('At least one file or URL is required.')
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        safety.require_can_write(config, row['id'])
+        if caption:
+            safety.require_text_allowed(config, caption)
+        summary = 'Files: {}'.format(', '.join(str(item) for item in file_items))
+        if caption:
+            summary += '\nCaption: {}'.format(caption)
+        if dry_run:
+            safety.audit_record(
+                config, 'send_file', row['id'], chat_title=row['title'],
+                text=caption or summary, dry_run=True, status='dry_run')
+            return {
+                'sent': False,
+                'dry_run': True,
+                'chat': row,
+                'message_ids': [],
+                'files': file_items,
+            }
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'send_file', row['id'], chat_title=row['title'],
+                text=caption or summary, status='cancelled')
+            return {
+                'sent': False,
+                'dry_run': False,
+                'chat': row,
+                'message_ids': [],
+                'files': file_items,
+            }
+        kwargs = {
+            'force_document': bool(force_document),
+        }
+        if caption not in (None, ''):
+            kwargs['caption'] = caption
+        if reply_to is not None:
+            kwargs['reply_to'] = int(reply_to)
+        if silent is not None:
+            kwargs['silent'] = bool(silent)
+        if voice_note:
+            kwargs['voice_note'] = True
+        if video_note:
+            kwargs['video_note'] = True
+        if supports_streaming:
+            kwargs['supports_streaming'] = True
+        if thumb not in (None, ''):
+            kwargs['thumb'] = thumb
+        if ttl is not None:
+            kwargs['ttl'] = int(ttl)
+        if mime_type not in (None, ''):
+            kwargs['mime_type'] = mime_type
+        if clear_draft:
+            kwargs['clear_draft'] = True
+        if background is not None:
+            kwargs['background'] = bool(background)
+        if comment_to is not None:
+            kwargs['comment_to'] = int(comment_to)
+        if send_as not in (None, ''):
+            kwargs['send_as'] = send_as
+        if message_effect_id is not None:
+            kwargs['message_effect_id'] = int(message_effect_id)
+        buttons = _buttons_from_json(buttons_json)
+        if buttons is not None:
+            kwargs['buttons'] = buttons
+        parsed_schedule = _parse_datetime_arg(schedule)
+        if parsed_schedule is not None:
+            kwargs['schedule'] = parsed_schedule
+        file_arg = file_items if len(file_items) > 1 else file_items[0]
+        result = await client.send_file(entity, file_arg, **kwargs)
+        message_ids = _sent_message_ids(result)
+        safety.audit_record(
+            config, 'send_file', row['id'], chat_title=row['title'],
+            text=caption or summary,
+            message_id=message_ids[0] if message_ids else None,
+            status='sent')
+        return {
+            'sent': True,
+            'dry_run': False,
+            'chat': row,
+            'message_ids': message_ids,
+            'files': file_items,
+        }
+
+
+async def edit_message(config, chat, message_id, text, parse_mode=_UNSET,
+                       link_preview=None, assume_yes=False, dry_run=False,
+                       input_func=input, output_func=print,
+                       buttons_json=None, schedule=None):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        safety.require_can_write(config, row['id'])
+        safety.require_text_allowed(config, text)
+        message_id = int(message_id)
+        summary = 'Edit message {}: {}'.format(message_id, text)
+        if dry_run:
+            safety.audit_record(
+                config, 'edit_message', row['id'], chat_title=row['title'],
+                text=text, message_id=message_id, dry_run=True,
+                status='dry_run')
+            return {'edited': False, 'dry_run': True, 'chat': row,
+                    'message_id': message_id}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'edit_message', row['id'], chat_title=row['title'],
+                text=text, message_id=message_id, status='cancelled')
+            return {'edited': False, 'dry_run': False, 'chat': row,
+                    'message_id': message_id}
+        kwargs = {}
+        if parse_mode is not _UNSET:
+            kwargs['parse_mode'] = parse_mode
+        if link_preview is not None:
+            kwargs['link_preview'] = bool(link_preview)
+        buttons = _buttons_from_json(buttons_json)
+        if buttons is not None:
+            kwargs['buttons'] = buttons
+        parsed_schedule = _parse_datetime_arg(schedule)
+        if parsed_schedule is not None:
+            kwargs['schedule'] = parsed_schedule
+        result = await client.edit_message(entity, message_id, text, **kwargs)
+        safety.audit_record(
+            config, 'edit_message', row['id'], chat_title=row['title'],
+            text=text, message_id=message_id, status='edited')
+        return {'edited': True, 'dry_run': False, 'chat': row,
+                'message_id': message_id, 'result': _result_summary(result)}
+
+
+async def delete_messages(config, chat, message_ids, revoke=False,
+                          assume_yes=False, dry_run=False, input_func=input,
+                          output_func=print):
+    config.require_credentials()
+    ids = _message_id_list(message_ids)
+    if not ids:
+        raise TelegramCliError('At least one message id is required.')
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        safety.require_can_write(config, row['id'])
+        summary = 'Delete message id(s): {}'.format(
+            ', '.join(str(item) for item in ids))
+        if dry_run:
+            safety.audit_record(
+                config, 'delete_messages', row['id'], chat_title=row['title'],
+                text=summary, dry_run=True, status='dry_run')
+            return {'deleted': False, 'dry_run': True, 'chat': row,
+                    'message_ids': ids}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'delete_messages', row['id'], chat_title=row['title'],
+                text=summary, status='cancelled')
+            return {'deleted': False, 'dry_run': False, 'chat': row,
+                    'message_ids': ids}
+        result = await client.delete_messages(entity, ids, revoke=bool(revoke))
+        safety.audit_record(
+            config, 'delete_messages', row['id'], chat_title=row['title'],
+            text=summary, status='deleted')
+        return {'deleted': True, 'dry_run': False, 'chat': row,
+                'message_ids': ids, 'result': _result_summary(result)}
+
+
+async def forward_messages(config, from_chat, to_chat, message_ids,
+                           silent=None, assume_yes=False, dry_run=False,
+                           input_func=input, output_func=print,
+                           background=None, with_my_score=None,
+                           schedule=None, drop_author=None,
+                           drop_media_captions=None):
+    config.require_credentials()
+    ids = _message_id_list(message_ids)
+    if not ids:
+        raise TelegramCliError('At least one message id is required.')
+    async with _client(config) as client:
+        from_entity, from_row = await resolve_chat(client, from_chat, allow_users=True)
+        to_entity, to_row = await resolve_chat(client, to_chat)
+        safety.require_can_write(config, to_row['id'])
+        summary = 'Forward from {} id(s): {}'.format(
+            from_row.get('title') or from_row.get('id'),
+            ', '.join(str(item) for item in ids))
+        if dry_run:
+            safety.audit_record(
+                config, 'forward_messages', to_row['id'],
+                chat_title=to_row['title'], text=summary, dry_run=True,
+                status='dry_run')
+            return {'forwarded': False, 'dry_run': True, 'from_chat': from_row,
+                    'to_chat': to_row, 'message_ids': ids,
+                    'forwarded_message_ids': []}
+        if not _confirm_write(to_row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'forward_messages', to_row['id'],
+                chat_title=to_row['title'], text=summary, status='cancelled')
+            return {'forwarded': False, 'dry_run': False, 'from_chat': from_row,
+                    'to_chat': to_row, 'message_ids': ids,
+                    'forwarded_message_ids': []}
+        kwargs = {}
+        if silent is not None:
+            kwargs['silent'] = bool(silent)
+        if background is not None:
+            kwargs['background'] = bool(background)
+        if with_my_score is not None:
+            kwargs['with_my_score'] = bool(with_my_score)
+        if drop_author is not None:
+            kwargs['drop_author'] = bool(drop_author)
+        if drop_media_captions is not None:
+            kwargs['drop_media_captions'] = bool(drop_media_captions)
+        parsed_schedule = _parse_datetime_arg(schedule)
+        if parsed_schedule is not None:
+            kwargs['schedule'] = parsed_schedule
+        result = await client.forward_messages(
+            to_entity, ids, from_entity, **kwargs)
+        forwarded_ids = _sent_message_ids(result)
+        safety.audit_record(
+            config, 'forward_messages', to_row['id'],
+            chat_title=to_row['title'], text=summary,
+            message_id=forwarded_ids[0] if forwarded_ids else None,
+            status='forwarded')
+        return {'forwarded': True, 'dry_run': False, 'from_chat': from_row,
+                'to_chat': to_row, 'message_ids': ids,
+                'forwarded_message_ids': forwarded_ids}
+
+
+async def mark_read(config, chat, message_ids=None, clear_mentions=False,
+                    clear_reactions=False, assume_yes=False, dry_run=False,
+                    input_func=input, output_func=print):
+    config.require_credentials()
+    ids = _message_id_list(message_ids)
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        safety.require_can_write(config, row['id'])
+        summary = 'Mark read'
+        if ids:
+            summary += ' through id(s): {}'.format(
+                ', '.join(str(item) for item in ids))
+        if dry_run:
+            safety.audit_record(
+                config, 'read_messages', row['id'], chat_title=row['title'],
+                text=summary, dry_run=True, status='dry_run')
+            return {'read': False, 'dry_run': True, 'chat': row,
+                    'message_ids': ids}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'read_messages', row['id'], chat_title=row['title'],
+                text=summary, status='cancelled')
+            return {'read': False, 'dry_run': False, 'chat': row,
+                    'message_ids': ids}
+        kwargs = {
+            'clear_mentions': bool(clear_mentions),
+            'clear_reactions': bool(clear_reactions),
+        }
+        if ids:
+            kwargs['message'] = ids
+        result = await client.send_read_acknowledge(entity, **kwargs)
+        safety.audit_record(
+            config, 'read_messages', row['id'], chat_title=row['title'],
+            text=summary, status='read')
+        return {'read': True, 'dry_run': False, 'chat': row,
+                'message_ids': ids, 'result': _result_summary(result)}
+
+
+async def pin_message_op(config, chat, message_id=None, unpin=False,
+                         notify=False, pm_oneside=False, assume_yes=False,
+                         dry_run=False, input_func=input, output_func=print):
+    config.require_credentials()
+    if not unpin and message_id is None:
+        raise TelegramCliError('message_id is required for pin.')
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        safety.require_can_write(config, row['id'])
+        message_id_value = None if message_id is None else int(message_id)
+        action = 'unpin_message' if unpin else 'pin_message'
+        summary = '{} {}'.format(
+            'Unpin' if unpin else 'Pin',
+            message_id_value if message_id_value is not None else 'latest pinned message')
+        if dry_run:
+            safety.audit_record(
+                config, action, row['id'], chat_title=row['title'],
+                text=summary, message_id=message_id_value, dry_run=True,
+                status='dry_run')
+            return {'pinned': False, 'unpinned': False, 'dry_run': True,
+                    'chat': row, 'message_id': message_id_value}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, action, row['id'], chat_title=row['title'],
+                text=summary, message_id=message_id_value, status='cancelled')
+            return {'pinned': False, 'unpinned': False, 'dry_run': False,
+                    'chat': row, 'message_id': message_id_value}
+        if unpin:
+            result = await client.unpin_message(
+                entity, message=message_id_value, notify=bool(notify))
+        else:
+            result = await client.pin_message(
+                entity, message_id_value,
+                notify=bool(notify), pm_oneside=bool(pm_oneside))
+        safety.audit_record(
+            config, action, row['id'], chat_title=row['title'],
+            text=summary, message_id=message_id_value,
+            status='unpinned' if unpin else 'pinned')
+        return {'pinned': not unpin, 'unpinned': bool(unpin),
+                'dry_run': False, 'chat': row,
+                'message_id': message_id_value,
+                'result': _result_summary(result)}
+
+
+async def copy_messages(config, from_chat, to_chat, message_ids,
+                        silent=None, assume_yes=False, dry_run=False,
+                        input_func=input, output_func=print):
+    config.require_credentials()
+    ids = _message_id_list(message_ids)
+    if not ids:
+        raise TelegramCliError('At least one message id is required.')
+    async with _client(config) as client:
+        from_entity, from_row = await resolve_chat(
+            client, from_chat, allow_users=True)
+        to_entity, to_row = await resolve_chat(client, to_chat)
+        safety.require_can_write(config, to_row['id'])
+        messages = await client.get_messages(from_entity, ids=ids)
+        message_items = messages if isinstance(messages, (list, tuple)) else [messages]
+        summary = 'Copy from {} id(s): {}'.format(
+            from_row.get('title') or from_row.get('id'),
+            ', '.join(str(item) for item in ids))
+        if dry_run:
+            safety.audit_record(
+                config, 'copy_messages', to_row['id'],
+                chat_title=to_row['title'], text=summary, dry_run=True,
+                status='dry_run')
+            return {'copied': False, 'dry_run': True, 'from_chat': from_row,
+                    'to_chat': to_row, 'message_ids': ids,
+                    'copied_message_ids': []}
+        if not _confirm_write(to_row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'copy_messages', to_row['id'],
+                chat_title=to_row['title'], text=summary, status='cancelled')
+            return {'copied': False, 'dry_run': False, 'from_chat': from_row,
+                    'to_chat': to_row, 'message_ids': ids,
+                    'copied_message_ids': []}
+        sent_ids = []
+        for message in message_items:
+            if message is None:
+                continue
+            text = getattr(message, 'message', '') or ''
+            if text:
+                safety.require_text_allowed(config, text)
+            kwargs = {}
+            if silent is not None:
+                kwargs['silent'] = bool(silent)
+            sent = await client.send_message(to_entity, message, **kwargs)
+            sent_ids.extend(_sent_message_ids(sent))
+        safety.audit_record(
+            config, 'copy_messages', to_row['id'],
+            chat_title=to_row['title'], text=summary,
+            message_id=sent_ids[0] if sent_ids else None,
+            status='copied')
+        return {'copied': True, 'dry_run': False, 'from_chat': from_row,
+                'to_chat': to_row, 'message_ids': ids,
+                'copied_message_ids': sent_ids}
+
+
+async def edit_message_media(config, chat, message_id, text=None, file=None,
+                             thumb=None, force_document=False,
+                             supports_streaming=False, parse_mode=_UNSET,
+                             link_preview=None, buttons_json=None,
+                             assume_yes=False, dry_run=False,
+                             input_func=input, output_func=print):
+    config.require_credentials()
+    if text in (None, '') and file in (None, '') and buttons_json in (None, ''):
+        raise TelegramCliError(
+            'At least one of text, file, or buttons-json is required.')
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        safety.require_can_write(config, row['id'])
+        if text not in (None, ''):
+            safety.require_text_allowed(config, text)
+        message_id = int(message_id)
+        summary = 'Edit media message {}'.format(message_id)
+        if dry_run:
+            safety.audit_record(
+                config, 'edit_message_media', row['id'],
+                chat_title=row['title'], text=text or summary,
+                message_id=message_id, dry_run=True, status='dry_run')
+            return {'edited': False, 'dry_run': True, 'chat': row,
+                    'message_id': message_id}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'edit_message_media', row['id'],
+                chat_title=row['title'], text=text or summary,
+                message_id=message_id, status='cancelled')
+            return {'edited': False, 'dry_run': False, 'chat': row,
+                    'message_id': message_id}
+        kwargs = {
+            'file': file,
+            'force_document': bool(force_document),
+            'supports_streaming': bool(supports_streaming),
+        }
+        if text is not None:
+            kwargs['text'] = text
+        if thumb not in (None, ''):
+            kwargs['thumb'] = thumb
+        if parse_mode is not _UNSET:
+            kwargs['parse_mode'] = parse_mode
+        if link_preview is not None:
+            kwargs['link_preview'] = bool(link_preview)
+        buttons = _buttons_from_json(buttons_json)
+        if buttons is not None:
+            kwargs['buttons'] = buttons
+        result = await client.edit_message(entity, message_id, **kwargs)
+        safety.audit_record(
+            config, 'edit_message_media', row['id'],
+            chat_title=row['title'], text=text or summary,
+            message_id=message_id, status='edited')
+        return {'edited': True, 'dry_run': False, 'chat': row,
+                'message_id': message_id, 'result': _result_summary(result)}
+
+
+async def message_action(config, chat, action, duration=2.0, delay=4.0,
+                         assume_yes=False, dry_run=False,
+                         input_func=input, output_func=print):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        safety.require_can_write(config, row['id'])
+        summary = 'Show chat action: {}'.format(action)
+        if dry_run:
+            safety.audit_record(
+                config, 'message_action', row['id'], chat_title=row['title'],
+                text=summary, dry_run=True, status='dry_run')
+            return {'acted': False, 'dry_run': True, 'chat': row,
+                    'action': action}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'message_action', row['id'], chat_title=row['title'],
+                text=summary, status='cancelled')
+            return {'acted': False, 'dry_run': False, 'chat': row,
+                    'action': action}
+        if str(action).lower() == 'cancel':
+            await client.action(entity, 'cancel')
+        else:
+            async with client.action(entity, action, delay=float(delay)):
+                await asyncio.sleep(max(0.0, float(duration)))
+        safety.audit_record(
+            config, 'message_action', row['id'], chat_title=row['title'],
+            text=summary, status='acted')
+        return {'acted': True, 'dry_run': False, 'chat': row,
+                'action': action}
+
+
+async def dialog_folder(config, chat, folder, assume_yes=False,
+                        dry_run=False, input_func=input, output_func=print):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat, allow_users=True)
+        safety.require_can_write(config, row['id'])
+        folder = int(folder)
+        summary = 'Move dialog to folder {}'.format(folder)
+        if dry_run:
+            safety.audit_record(
+                config, 'dialog_folder', row['id'], chat_title=row['title'],
+                text=summary, dry_run=True, status='dry_run')
+            return {'updated': False, 'dry_run': True, 'chat': row,
+                    'folder': folder}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'dialog_folder', row['id'], chat_title=row['title'],
+                text=summary, status='cancelled')
+            return {'updated': False, 'dry_run': False, 'chat': row,
+                    'folder': folder}
+        result = await client.edit_folder(entity, folder)
+        safety.audit_record(
+            config, 'dialog_folder', row['id'], chat_title=row['title'],
+            text=summary, status='updated')
+        return {'updated': True, 'dry_run': False, 'chat': row,
+                'folder': folder, 'result': _result_summary(result)}
+
+
+async def dialog_delete(config, chat, revoke=False, assume_yes=False,
+                        dry_run=False, input_func=input, output_func=print):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat, allow_users=True)
+        safety.require_can_write(config, row['id'])
+        summary = 'Delete/leave dialog'
+        if dry_run:
+            safety.audit_record(
+                config, 'dialog_delete', row['id'], chat_title=row['title'],
+                text=summary, dry_run=True, status='dry_run')
+            return {'deleted': False, 'dry_run': True, 'chat': row}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'dialog_delete', row['id'], chat_title=row['title'],
+                text=summary, status='cancelled')
+            return {'deleted': False, 'dry_run': False, 'chat': row}
+        result = await client.delete_dialog(entity, revoke=bool(revoke))
+        safety.audit_record(
+            config, 'dialog_delete', row['id'], chat_title=row['title'],
+            text=summary, status='deleted')
+        return {'deleted': True, 'dry_run': False, 'chat': row,
+                'result': _result_summary(result)}
+
+
+async def download_media(config, chat, message_id, output_dir=None,
+                         output_file=None, allow_users=False):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(
+            client, chat, allow_users=allow_users)
+        message_id = int(message_id)
+        message = await client.get_messages(entity, ids=message_id)
+        if message is None:
+            raise TelegramCliError('Message not found: {}'.format(message_id))
+        if output_file not in (None, ''):
+            target = Path(output_file).expanduser()
+            target.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            target = _download_base_dir(config, output_dir=output_dir)
+        path = await client.download_media(message, file=str(target))
+        return _download_row(
+            'media', path, chat=row, message_id=message_id)
+
+
+async def download_profile_photo(config, query, output_dir=None, big=True):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, query, allow_users=True)
+        target = _download_base_dir(config, output_dir=output_dir)
+        path = await client.download_profile_photo(
+            entity, file=str(target), download_big=bool(big))
+        return _download_row('profile_photo', path, entity=row)
+
+
+async def admin_kick(config, chat, user, assume_yes=False, dry_run=False,
+                     input_func=input, output_func=print):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        user_entity, user_row = await resolve_chat(client, user, allow_users=True)
+        safety.require_can_write(config, row['id'])
+        summary = 'Kick participant: {}'.format(
+            user_row.get('title') or user_row.get('id'))
+        if dry_run:
+            safety.audit_record(
+                config, 'admin_kick', row['id'], chat_title=row['title'],
+                text=summary, dry_run=True, status='dry_run')
+            return {'kicked': False, 'dry_run': True, 'chat': row,
+                    'user': user_row}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'admin_kick', row['id'], chat_title=row['title'],
+                text=summary, status='cancelled')
+            return {'kicked': False, 'dry_run': False, 'chat': row,
+                    'user': user_row}
+        result = await client.kick_participant(entity, user_entity)
+        safety.audit_record(
+            config, 'admin_kick', row['id'], chat_title=row['title'],
+            text=summary, status='kicked')
+        return {'kicked': True, 'dry_run': False, 'chat': row,
+                'user': user_row, 'result': _result_summary(result)}
+
+
+async def admin_permissions_set(config, chat, user=None, until_date=None,
+                                enabled_permissions=None,
+                                disabled_permissions=None,
+                                assume_yes=False, dry_run=False,
+                                input_func=input, output_func=print):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        user_entity = None
+        user_row = None
+        if user not in (None, ''):
+            user_entity, user_row = await resolve_chat(
+                client, user, allow_users=True)
+        safety.require_can_write(config, row['id'])
+        kwargs = _bool_options(
+            _PERMISSION_NAMES,
+            enabled=enabled_permissions,
+            disabled=disabled_permissions)
+        parsed_until = _parse_datetime_arg(until_date)
+        if parsed_until is not None:
+            kwargs['until_date'] = parsed_until
+        summary = 'Edit permissions'
+        if user_row:
+            summary += ' for {}'.format(user_row.get('title') or user_row.get('id'))
+        if dry_run:
+            safety.audit_record(
+                config, 'admin_permissions_set', row['id'],
+                chat_title=row['title'], text=summary,
+                dry_run=True, status='dry_run')
+            return {'updated': False, 'dry_run': True, 'chat': row,
+                    'user': user_row, 'permissions': kwargs}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'admin_permissions_set', row['id'],
+                chat_title=row['title'], text=summary, status='cancelled')
+            return {'updated': False, 'dry_run': False, 'chat': row,
+                    'user': user_row, 'permissions': kwargs}
+        result = await client.edit_permissions(entity, user_entity, **kwargs)
+        safety.audit_record(
+            config, 'admin_permissions_set', row['id'],
+            chat_title=row['title'], text=summary, status='updated')
+        return {'updated': True, 'dry_run': False, 'chat': row,
+                'user': user_row, 'permissions': kwargs,
+                'result': _result_summary(result)}
+
+
+async def admin_edit_admin(config, chat, user, enabled_rights=None,
+                           disabled_rights=None, title=None, is_admin=None,
+                           assume_yes=False, dry_run=False,
+                           input_func=input, output_func=print):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        user_entity, user_row = await resolve_chat(client, user, allow_users=True)
+        safety.require_can_write(config, row['id'])
+        kwargs = _bool_options(
+            _ADMIN_RIGHT_NAMES, enabled=enabled_rights,
+            disabled=disabled_rights)
+        if title not in (None, ''):
+            kwargs['title'] = title
+        if is_admin is not None:
+            kwargs['is_admin'] = bool(is_admin)
+        summary = 'Edit admin rights for {}'.format(
+            user_row.get('title') or user_row.get('id'))
+        if dry_run:
+            safety.audit_record(
+                config, 'admin_edit_admin', row['id'],
+                chat_title=row['title'], text=summary,
+                dry_run=True, status='dry_run')
+            return {'updated': False, 'dry_run': True, 'chat': row,
+                    'user': user_row, 'rights': kwargs}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'admin_edit_admin', row['id'],
+                chat_title=row['title'], text=summary, status='cancelled')
+            return {'updated': False, 'dry_run': False, 'chat': row,
+                    'user': user_row, 'rights': kwargs}
+        result = await client.edit_admin(entity, user_entity, **kwargs)
+        safety.audit_record(
+            config, 'admin_edit_admin', row['id'],
+            chat_title=row['title'], text=summary, status='updated')
+        return {'updated': True, 'dry_run': False, 'chat': row,
+                'user': user_row, 'rights': kwargs,
+                'result': _result_summary(result)}
+
+
+async def bot_inline_query(config, bot, query, chat=None, offset=None):
+    config.require_credentials()
+    async with _client(config) as client:
+        kwargs = {}
+        chat_row = None
+        if chat not in (None, ''):
+            chat_entity, chat_row = await resolve_chat(
+                client, chat, allow_users=True)
+            kwargs['entity'] = chat_entity
+        if offset not in (None, ''):
+            kwargs['offset'] = offset
+        results = await client.inline_query(bot, query, **kwargs)
+        rows = [
+            _inline_result_row(result, index=index)
+            for index, result in enumerate(results)
+        ]
+        return {'bot': bot, 'query': query, 'chat': chat_row, 'results': rows}
+
+
+async def bot_inline_send(config, bot, query, chat, index=0, reply_to=None,
+                          offset=None, assume_yes=False, dry_run=False,
+                          input_func=input, output_func=print):
+    config.require_credentials()
+    async with _client(config) as client:
+        entity, row = await resolve_chat(client, chat)
+        safety.require_can_write(config, row['id'])
+        kwargs = {'entity': entity}
+        if offset not in (None, ''):
+            kwargs['offset'] = offset
+        results = await client.inline_query(bot, query, **kwargs)
+        index = int(index)
+        try:
+            result = results[index]
+        except IndexError as exc:
+            raise TelegramCliError(
+                'Inline result index out of range: {}.'.format(index)) from exc
+        summary = 'Send inline result {} from {}'.format(index, bot)
+        if dry_run:
+            safety.audit_record(
+                config, 'bot_inline_send', row['id'], chat_title=row['title'],
+                text=summary, dry_run=True, status='dry_run')
+            return {'sent': False, 'dry_run': True, 'chat': row,
+                    'result': _inline_result_row(result, index=index),
+                    'message_ids': []}
+        if not _confirm_write(row, summary, assume_yes, input_func, output_func):
+            safety.audit_record(
+                config, 'bot_inline_send', row['id'], chat_title=row['title'],
+                text=summary, status='cancelled')
+            return {'sent': False, 'dry_run': False, 'chat': row,
+                    'result': _inline_result_row(result, index=index),
+                    'message_ids': []}
+        click_kwargs = {'entity': entity}
+        if reply_to is not None:
+            click_kwargs['reply_to'] = int(reply_to)
+        sent = await result.click(**click_kwargs)
+        message_ids = _sent_message_ids(sent)
+        safety.audit_record(
+            config, 'bot_inline_send', row['id'], chat_title=row['title'],
+            text=summary, message_id=message_ids[0] if message_ids else None,
+            status='sent')
+        return {'sent': True, 'dry_run': False, 'chat': row,
+                'result': _inline_result_row(result, index=index),
+                'message_ids': message_ids}
 
 
 async def observe(config, chat, include_self=False, timeout=None):
